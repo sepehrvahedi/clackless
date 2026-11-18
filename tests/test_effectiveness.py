@@ -91,14 +91,15 @@ def test_stationary_noise_reduction(color, tts_speech):
     assert metrics.si_sdr(out, voice) > metrics.si_sdr(mix, voice) + 1.0
 
 
-@pytest.mark.parametrize("sr", [16000, 48000])
+@pytest.mark.parametrize("sr", [16000, 44100, 48000])
 @pytest.mark.parametrize("seed", [1, 2, 3])
-def test_deep_voice_is_preserved(sr, seed):
-    """Low voices (~80 Hz) are the hardest case: each glottal pulse looks a bit
-    like a click. They must still pass with little damage."""
-    voice = synth.speech(sr, DUR, seed=seed, f0=80)
+@pytest.mark.parametrize("f0,floor", [(80, 20.0), (65, 15.0)])
+def test_deep_voice_is_preserved(sr, seed, f0, floor):
+    """Low voices are the hardest case: each glottal pulse looks a bit like a
+    click. Deep voices (80 Hz) must pass cleanly, vocal fry (65 Hz) nearly so."""
+    voice = synth.speech(sr, DUR, seed=seed, f0=f0)
     _, (out,) = shadow_process(voice, [voice], sr)
-    assert metrics.si_sdr(out, voice) >= 15.0
+    assert metrics.si_sdr(out, voice) >= floor
 
 
 def test_noise_reduction_off_by_default_leaves_room_tone():

@@ -39,7 +39,7 @@ interviewer writing feedback) your microphone sends the clicks to everyone else.
 
 | ID | Category | Requirement | How it is verified |
 |----|----------|-------------|--------------------|
-| NFR-1 | Portability | Runs on Windows, macOS and Linux (x86-64 and ARM64) with Python ≥ 3.9; pure Python + NumPy/SciPy + PortAudio (no compiler, no GPU). | CI matrix on `windows-latest`, `macos-latest`, `ubuntu-latest`. |
+| NFR-1 | Portability | Runs on Windows, macOS and Linux (x86-64 and ARM64) with Python ≥ 3.10; pure Python + NumPy/SciPy + PortAudio (no compiler, no GPU). | CI matrix on `windows-latest`, `macos-latest`, `ubuntu-latest`. |
 | NFR-2 | Latency | Added algorithmic latency ≤ 40 ms at 48 kHz (meetings already have 100–300 ms; > ~50 ms extra starts to be noticeable in conversation). | `test_latency_bound` asserts the reported latency; identity test checks the actual delay matches. |
 | NFR-3 | Performance | Real-time factor ≤ 0.25 on a CI runner (≤ 5 % of one core on a laptop) so it can run alongside the meeting app. | `test_realtime_factor`. |
 | NFR-4 | Effectiveness | Typing while the typist is silent: keystroke loudness reduced by ≥ 18 dB(A) in every tested condition (≥ 20 dB(A) on average); typing while talking: ≥ 5 dB(A); room tone changed by ≤ 2 dB. | `tests/test_effectiveness.py`, `clackless selftest`, `scripts/evaluate.py` (3 sample rates × 3 seeds, synthetic and real TTS voices). |

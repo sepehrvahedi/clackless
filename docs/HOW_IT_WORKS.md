@@ -23,7 +23,7 @@ Neural denoisers (RNNoise, DeepFilterNet, NVIDIA Broadcast, Krisp) are good,
 but they need model files, sometimes a GPU, and they are trained mainly for
 *stationary* noise. A keystroke has a very specific, physical signature that
 can be detected directly, which keeps Clackless small (NumPy + SciPy), fast
-(about 3 % of one CPU core), explainable, and testable.
+(about 2 % of one CPU core), explainable, and testable.
 
 ## What a keystroke looks like
 
@@ -39,8 +39,11 @@ milliseconds, and voiced speech is *periodic* (a glottal pulse every 2.5–14 ms
 
 ## The algorithm (`src/clackless/dsp.py`)
 
-Audio is analysed with an STFT (~10 ms frames, 75 % overlap) and a 20 ms
-look-ahead. Total added latency is 32–36 ms.
+Audio is analysed with an STFT (16 ms frames, 75 % overlap) and a 20 ms
+look-ahead. Total added latency is 36 ms. The frame length is the same at
+every sample rate: 16 ms averages over at least one glottal pulse of a deep
+voice, so the pulses do not look like individual clicks (with 10 ms frames, a
+buzzy low voice lost up to 9 dB of fidelity).
 
 1. **Reference "what would be here without a click".** Per frequency bin:
    the median of the last 120 ms of *already cleaned* frames (so earlier
@@ -69,7 +72,7 @@ look-ahead. Total added latency is 32–36 ms.
    * *Burst cap*: anything that sticks out continuously for > 50 ms is not a
      keystroke; the detector stands down until the signal settles.
 5. **Suppression.** During an event each bin is clamped to the spectrum
-   captured just before it started (+3 dB tolerance). Speech harmonics that
+   captured just before it started (+1.6 dB tolerance). Speech harmonics that
    were already there survive; only click energy above them is removed. The
    event is held 25 ms for the click's tail. After its first 20 ms, only bins
    that *stay* faded are clamped, which protects a voice that begins right after
@@ -99,10 +102,12 @@ was damaged" are measured independently.
 * `scripts/evaluate.py` runs the grid (3 sample rates × 3 seeds) and is the
   tool to use before and after any DSP change.
 
-Several design decisions above came straight out of that grid. For example,
-the pitch masking and the live re-triggering were added after the grid showed
-a low-pitched voice losing whole vowel endings. The 8–12 kHz band was added
-after a spectrogram showed clicks surviving under speech.
+Several design decisions above came straight out of that grid and CI. For
+example, the pitch masking and the live re-triggering were added after the grid
+showed a low-pitched voice losing whole vowel endings. The 8–12 kHz band was
+added after a spectrogram showed clicks surviving under speech. The 16 ms frame
+length came from the first CI run: the Windows and espeak-ng voices (lower and
+buzzier than the macOS one) failed the speech-fidelity checks with 10 ms frames.
 
 ## Known limitations
 
@@ -110,8 +115,8 @@ after a spectrogram showed clicks surviving under speech.
   scissor keys, mechanical switches, thocky keyboards). Use
   `clackless record` + `clackless selftest --typing` to measure yours, and
   please share results in an issue.
-* Typing *while the typist talks* is only reduced (≈ 7–14 dB(A)), not removed:
+* Typing *while the typist talks* is only reduced (≈ 7–13 dB(A)), not removed:
   where the voice is louder than the click, the click is left alone on purpose.
-* Very deep voices and vocal fry are the hardest case for false detections
-  (≥ 15 dB SI-SDR, versus ≥ 20 dB for typical voices).
+* Vocal fry (~65 Hz) is the hardest case for false detections (≥ 15 dB SI-SDR;
+  deep 80 Hz voices and typical voices ≥ 20 dB).
 * 8 kHz telephone-band audio has fewer cues (≈ 15 dB(A) removal).

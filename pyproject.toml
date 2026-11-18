@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "Remove keyboard typing sounds (and background noise) from live calls - Teams, Zoom, Meet - on Windows, macOS and Linux."
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [{ name = "Clackless contributors" }]
 keywords = ["noise suppression", "keyboard", "audio", "teams", "zoom", "meeting", "dsp"]
 classifiers = [
@@ -52,7 +52,7 @@ addopts = "-ra"
 
 [tool.ruff]
 line-length = 110
-target-version = "py39"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]

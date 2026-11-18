@@ -4,7 +4,7 @@
 
 Clackless sits between your meeting app (Teams, Zoom, Google Meet, Slack, Discord, …) and your
 speakers or microphone, and removes keystroke sounds in real time. It runs locally on
-Windows, macOS and Linux, adds about 32 ms of delay, uses about 3 % of one CPU core, and needs no GPU,
+Windows, macOS and Linux, adds about 36 ms of delay, uses about 2 % of one CPU core, and needs no GPU,
 no account and no internet connection.
 
 ![Spectrograms before and after Clackless](docs/spectrogram.png)
@@ -27,7 +27,7 @@ through. Clackless targets the keystrokes specifically.
 
 ## Quick start
 
-**1. Install** (Python 3.9+):
+**1. Install** (Python 3.10+):
 
 ```bash
 pipx install git+https://github.com/sepehrvahedi/clackless
@@ -79,16 +79,16 @@ The ranges cover 3 sample rates (16, 44.1, 48 kHz) × 3 different typists/voices
 
 | Scenario | Result | Acceptance threshold |
 |---|---|---|
-| Typing while the typist is silent (main case) | **19–25 dB(A) quieter** (mean 22.5) | ≥ 18 per case |
-| Room tone while typing | changed by < 1 dB | ≤ 2 dB |
-| Speech with no typing (synthetic and real TTS voice) | 23–40 dB SI-SDR (essentially untouched) | ≥ 20 |
-| Very deep voice (80 Hz) with no typing | 17–33 dB SI-SDR (mean 24) | ≥ 15 |
-| Typing while talking | 7–14 dB(A) quieter | ≥ 5 |
-| Speech while typing | 24–37 dB SI-SDR | ≥ 18 |
-| Added latency | 32–36 ms | ≤ 40 |
-| CPU | 1–3 % of real time | ≤ 25 % |
+| Typing while the typist is silent (main case) | **18.5–22.6 dB(A) quieter** (mean 20.9) | ≥ 18 per case |
+| Room tone while typing | changed by ≈ 1 dB or less | ≤ 2 dB |
+| Speech with no typing (synthetic voice, macOS and espeak-ng TTS voices) | 21–40 dB SI-SDR (essentially untouched) | ≥ 20 |
+| Deep voice (80 Hz) / vocal fry (65 Hz), no typing | 24–38 / 18.6–23.5 dB SI-SDR | ≥ 20 / ≥ 15 |
+| Typing while talking | 7–13 dB(A) quieter | ≥ 5 |
+| Speech while typing | 24–36 dB SI-SDR | ≥ 18 |
+| Added latency | 36 ms | ≤ 40 |
+| CPU | 1–2 % of real time | ≤ 25 % |
 
-20 dB(A) means the clicks sound roughly a quarter as loud (perceived loudness halves every
+About 20 dB(A) means the clicks sound roughly a quarter as loud (perceived loudness halves every
 ~10 dB) and carry 1/100 of the energy. Details of the method and evaluation:
 [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md). Product requirements:
 [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md).
@@ -133,14 +133,14 @@ modes writes nothing to disk.
   `clackless record` / `selftest --typing` and share results.
 * **Typing while talking is reduced, not removed.** Where the voice is louder than a click,
   the click is left alone on purpose, so the voice is never damaged.
-* **Very deep voices / vocal fry** are the hardest case for false detections. They are still
-  protected (≥ 15 dB SI-SDR), with a smaller margin than typical voices.
+* **Vocal fry** (very low, creaky voice, ~65 Hz) is the hardest case for false detections. It
+  is still protected (≥ 15 dB SI-SDR), with a smaller margin than typical voices.
 * **You need a virtual audio cable** on macOS and Windows (free, one-time install). Use
   separate cables for `listen` and `mic` if you run both.
 * **Linux live routing** relies on PortAudio's ALSA `pulse` device (pipewire-alsa or the
   PulseAudio ALSA plugin). It is covered by unit tests, but has had less real-world use than
   macOS and Windows so far.
-* Bluetooth headsets add their own latency; Clackless's 32 ms comes on top of that.
+* Bluetooth headsets add their own latency; Clackless's 36 ms comes on top of that.
 
 ## Development
 

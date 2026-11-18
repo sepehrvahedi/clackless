@@ -2,7 +2,7 @@
 
 How it works (docs/HOW_IT_WORKS.md has the long version with the reasoning)
 ---------------------------------------------------------------------------
-Audio is analysed with a short-time Fourier transform (~10 ms frames, 75 %
+Audio is analysed with a short-time Fourier transform (16 ms frames, 75 %
 overlap) and a ~20 ms look-ahead. For every frame we estimate what the signal
 would look like *without* a keystroke, from:
 
@@ -64,8 +64,8 @@ class Settings:
     bypass: bool = False
     """Pass audio through untouched (still delayed by the same latency)."""
 
-    frame_ms: float = 10.0
-    """STFT frame length; rounded up to a power of two in samples."""
+    frame_ms: float = 16.0
+    """STFT frame length. 16 ms averages over >= 1 glottal pulse of a deep voice."""
 
     lookahead_ms: float = 20.0
     """How far ahead the detector looks. Adds directly to latency."""
@@ -117,14 +117,10 @@ _PITCH_PERIOD_MS = 14.0  # longest glottal period we protect (deep voices / voca
 _CLICK_TAIL_MS = 20.0  # a click's own tail: clamped hard; later in an event, sustained sound is protected
 _MAX_BURST_MS = 50.0  # continuous "excess" longer than this is speech/noise, not a keystroke
 _SMOOTH_HZ = 400.0  # frequency smoothing for the decay test
-_TOLERANCE = 1.4  # +3 dB headroom above the reference so natural fluctuation is kept
+_TOLERANCE = 1.2  # +1.6 dB headroom above the reference so natural fluctuation is kept
 _NOISE_BIAS = 2.5  # minimum-statistics bias compensation
 _NOISE_FLOOR_DB = -18.0  # Wiener gain floor at noise_reduction == 1
 _SILENCE_FLOOR = 1e-4  # ~ -80 dBFS: below this nothing counts as "louder"
-
-
-def _next_pow2(n: int) -> int:
-    return 1 << max(4, int(np.ceil(np.log2(max(n, 1)))))
 
 
 class Suppressor:
@@ -137,7 +133,9 @@ class Suppressor:
         self.settings = (settings or Settings()).validate()
         s = self.settings
 
-        self.n_fft = _next_pow2(int(round(sample_rate * s.frame_ms / 1000.0)))
+        # Exact frame length (a multiple of 4 for the 75 % overlap), not a power
+        # of two: the time resolution must be the same at every sample rate.
+        self.n_fft = max(16, 4 * int(round(sample_rate * s.frame_ms / 1000.0 / 4)))
         self.hop = self.n_fft // 4
         self.n_bins = self.n_fft // 2 + 1
         frame_rate = sample_rate / self.hop
