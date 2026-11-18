@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "clackless"
+dynamic = ["version"]
+description = "Remove keyboard typing sounds (and background noise) from live calls - Teams, Zoom, Meet - on Windows, macOS and Linux."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [{ name = "Clackless contributors" }]
+keywords = ["noise suppression", "keyboard", "audio", "teams", "zoom", "meeting", "dsp"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Multimedia :: Sound/Audio :: Analysis",
+  "Topic :: Communications :: Conferencing",
+]
+dependencies = [
+  "numpy>=1.21",
+  "scipy>=1.7",
+  "sounddevice>=0.4.6",
+  "soundfile>=0.12",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "pytest-cov>=4", "ruff>=0.4"]
+
+[project.scripts]
+clackless = "clackless.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/sepehrvahedi/clackless"
+Issues = "https://github.com/sepehrvahedi/clackless/issues"
+
+[tool.hatch.version]
+path = "src/clackless/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/clackless"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 110
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["UP006", "UP007", "UP035", "UP037", "UP045", "E501"]
