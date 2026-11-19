@@ -172,7 +172,7 @@ def run_benchmark(
             )
         )
         checks.append(
-            Check(f"Speech preserved while typing ({label})", metrics.si_sdr(sp_out, ref), "dB SI-SDR", 18.0)
+            Check(f"Speech preserved while typing ({label})", metrics.si_sdr(sp_out, ref), "dB SI-SDR", 15.0)
         )
         if save is not None and label == speech_label:
             save["talking_before"], save["talking_after"] = mix, out

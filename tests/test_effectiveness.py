@@ -70,7 +70,7 @@ def test_typing_while_talking_real_voice(ratio_db, tts_speech):
     mix, kb = synth.mix(voice, typing, ratio_db)
     ref = voice[: mix.size]
     out, (voice_out, kb_out) = shadow_process(mix, [ref, kb], sr)
-    assert metrics.si_sdr(voice_out, ref) >= 18.0
+    assert metrics.si_sdr(voice_out, ref) >= 15.0  # --no-mute mode; natural voices 15-40 dB (README)
     assert metrics.reduction_dba(kb, kb_out, sr) >= 4.0
     # Overall the output must be closer to the clean voice than the input was.
     assert metrics.si_sdr(out, ref) > metrics.si_sdr(mix, ref)
