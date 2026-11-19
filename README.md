@@ -1,17 +1,18 @@
 # Clackless
 
-**Remove the other person's keyboard clatter from your calls — and your own from theirs.**
+**Turn down the other person's keyboard clatter on your calls — and your own on theirs.**
 
 Clackless sits between your meeting app (Teams, Zoom, Google Meet, Slack, Discord, …) and your
-speakers or microphone, and removes keystroke sounds in real time. It runs locally on
-Windows, macOS and Linux, adds about 36 ms of delay, uses about 2 % of one CPU core, and needs no GPU,
+speakers or microphone, and suppresses keystroke sounds in real time. It runs locally on
+Windows, macOS and Linux, adds about 36 ms of delay, uses a few % of one CPU core, and needs no GPU,
 no account and no internet connection.
 
 ![Spectrograms before and after Clackless](docs/spectrogram.png)
 
 *Top: someone typing during a call. Bottom: after Clackless. Left: the typist is silent (e.g. taking
-notes while you talk): the clicks are gone and the room tone is untouched. Right: typing while
-talking: most clicks are removed, while some under loud speech remain (see [Limitations](#limitations)).*
+notes while you talk). Right: typing while talking. This figure uses the keyboard model; on real
+keyboard recordings the clicks end up about half as loud rather than gone (see
+[How well it works](#how-well-it-works)).*
 
 ## Why
 
@@ -75,21 +76,31 @@ background-noise reduction (`--noise 0.5`; use `--noise 0` to disable).
 
 Every number below is reproduced by the test-suite (which CI runs on Windows, macOS and Linux), using
 *shadow filtering*: removal and speech damage are measured separately, on the same processing.
-The ranges cover 3 sample rates (16, 44.1, 48 kHz) × 3 different typists/voices.
+
+**On real keyboard recordings** (a laptop, a desktop keyboard and a mechanical Keychron, see
+[tests/data](tests/data/README.md)):
+
+| Scenario | Result |
+|---|---|
+| Typing while the typist is silent (main case) | **8–11 dB(A) quieter**: roughly half as loud |
+| Typing while the typist is also talking | 2–5 dB(A) quieter: slightly softer; the voice comes first |
+
+**On the evaluation grid** (keyboard model, synthetic + 3 real TTS voices, 16/44.1/48 kHz × 3 seeds):
 
 | Scenario | Result | Acceptance threshold |
 |---|---|---|
-| Typing while the typist is silent (main case) | **18.5–22.6 dB(A) quieter** (mean 20.9) | ≥ 18 per case |
-| Room tone while typing | changed by ≈ 1 dB or less | ≤ 2 dB |
-| Speech with no typing (synthetic voice, macOS and espeak-ng TTS voices) | 21–40 dB SI-SDR (essentially untouched) | ≥ 20 |
-| Deep voice (80 Hz) / vocal fry (65 Hz), no typing | 24–38 / 18.6–23.5 dB SI-SDR | ≥ 20 / ≥ 15 |
+| Typing while the typist is silent | 23.6–26.6 dB(A) quieter | ≥ 18 per case |
+| Room tone while typing | changed by ≤ 1.3 dB | ≤ 2 dB |
+| Speech with no typing (synthetic, macOS, Windows and espeak-ng voices) | 21–40 dB SI-SDR (essentially untouched) | ≥ 20 |
+| Deep voice (80 Hz) / vocal fry (65 Hz), no typing | ≥ 24 / ≥ 18 dB SI-SDR | ≥ 20 / ≥ 15 |
 | Typing while talking | 7–13 dB(A) quieter | ≥ 5 |
 | Speech while typing | 24–36 dB SI-SDR | ≥ 18 |
 | Added latency | 36 ms | ≤ 40 |
-| CPU | 1–2 % of real time | ≤ 25 % |
+| CPU | 3–7 % of real time | ≤ 25 % |
 
-About 20 dB(A) means the clicks sound roughly a quarter as loud (perceived loudness halves every
-~10 dB) and carry 1/100 of the energy. Details of the method and evaluation:
+Real fast typing is denser and more reverberant than the model (a click every 60–80 ms, ringing in the
+room), which is why real-keyboard numbers are lower: be guided by those. 10 dB(A) quieter sounds
+roughly half as loud. Details of the method and evaluation:
 [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md). Product requirements:
 [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md).
 
@@ -128,11 +139,12 @@ modes writes nothing to disk.
 
 ## Limitations
 
-* **Real keyboards vary.** The evaluation uses a physical keyboard model, a speech synthesizer and
-  real OS text-to-speech voices — not yet a large set of real recordings. Use
-  `clackless record` / `selftest --typing` and share results.
-* **Typing while talking is reduced, not removed.** Where the voice is louder than a click,
-  the click is left alone on purpose, so the voice is never damaged.
+* **Real typing is only partly removed.** On real keyboard recordings, clicks become about half as
+  loud (8–11 dB(A)), not silent. Fast, dense typing in a reverberant room is the hard case. Use
+  `clackless record` / `selftest --typing` to measure your keyboard, and please share results.
+* **Typing while talking is reduced only a little** (2–5 dB(A) on real keyboards). Where the voice and
+  a click overlap, the click is left alone on purpose to protect the voice. Very loud typing
+  over a low, buzzy voice can still cost the voice a little fidelity (≈ 17 dB SI-SDR).
 * **Vocal fry** (very low, creaky voice, ~65 Hz) is the hardest case for false detections. It
   is still protected (≥ 15 dB SI-SDR), with a smaller margin than typical voices.
 * **You need a virtual audio cable** on macOS and Windows (free, one-time install). Use

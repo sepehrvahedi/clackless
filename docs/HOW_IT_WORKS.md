@@ -77,7 +77,20 @@ buzzy low voice lost up to 9 dB of fidelity).
    event is held 25 ms for the click's tail. After its first 20 ms, only bins
    that *stay* faded are clamped, which protects a voice that begins right after
    a keystroke.
-6. **Optional stationary noise reduction**: a decision-directed Wiener filter
+6. **Typing gate (nobody speaking).** A small voice-activity detector
+   (`src/clackless/vad.py`) looks for stable pitch in the 150–1000 Hz band
+   (the harmonics of any voice, above desk and chassis booms) for ≥ 80 ms,
+   ≥ 9 dB above the background and above −70 dBFS. Measured on real
+   recordings, typing triggers it on < 1 % of frames and voices on 30–60 %.
+   While no voice has been confirmed for 2 s, every event that sticks out
+   ≥ 3 dB above the room floor is clamped to that floor (+4 dB) for 60 ms,
+   except bins that stay up through the look-ahead (the start of a word).
+   This is what handles dense, reverberant real typing, where "louder than
+   both the past and the future" is ambiguous because the next click or the
+   room echo is always close. A voice that starts is protected by that
+   sustain test and by a fast path in the detector (30 ms of very clean,
+   steady pitch).
+7. **Optional stationary noise reduction**: a decision-directed Wiener filter
    against a minimum-statistics noise floor (1.5 s memory), with a gain floor
    set by the `--noise` strength.
 
@@ -94,6 +107,9 @@ was damaged" are measured independently.
 * **Keyboard**: a physical model with press + release clicks (broadband
   impulse, 3–6 damped resonances, a bottom-out thump, spacebar rattle) typed in
   word-like bursts at 4–9 keys/s, over pink room tone at −70, −55 and −45 dBFS.
+* **Real keyboards**: three real typing recordings (laptop, desktop,
+  mechanical; public domain / CC BY, see `tests/data/README.md`). These are
+  the numbers to trust: 8–11 dB(A) removal while the typist is silent.
 * **Voices**: a source-filter speech synthesizer (random and deliberately deep
   80 Hz pitch) plus the operating system's real text-to-speech voice (macOS
   `say`, Windows SAPI, `espeak-ng` on Linux CI).
@@ -108,14 +124,18 @@ showed a low-pitched voice losing whole vowel endings. The 8–12 kHz band was
 added after a spectrogram showed clicks surviving under speech. The 16 ms frame
 length came from the first CI run: the Windows and espeak-ng voices (lower and
 buzzier than the macOS one) failed the speech-fidelity checks with 10 ms frames.
+The typing gate came from the first test on real keyboard recordings, which
+showed only 5–8 dB of removal against 20+ on the model: real fast typing is
+dense and reverberant, and the per-keystroke logic kept finding a nearby
+click or echo to "protect".
 
 ## Known limitations
 
-* The keyboard is a physical *model*. Real keyboards vary (laptop
-  scissor keys, mechanical switches, thocky keyboards). Use
-  `clackless record` + `clackless selftest --typing` to measure yours, and
-  please share results in an issue.
-* Typing *while the typist talks* is only reduced (≈ 7–13 dB(A)), not removed:
+* On real keyboards, clicks end up about half as loud (8–11 dB(A)), not
+  silent. Use `clackless record` + `clackless selftest --typing` to measure
+  yours, and please share results in an issue.
+* Typing *while the typist talks* is only reduced (≈ 7–13 dB(A) on the model,
+  2–5 dB(A) on real keyboards), not removed:
   where the voice is louder than the click, the click is left alone on purpose.
 * Vocal fry (~65 Hz) is the hardest case for false detections (≥ 15 dB SI-SDR;
   deep 80 Hz voices and typical voices ≥ 20 dB).

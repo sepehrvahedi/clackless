@@ -48,6 +48,8 @@ from typing import Deque, Optional
 import numpy as np
 from scipy.ndimage import uniform_filter1d
 
+from .vad import VoiceDetector
+
 __all__ = ["Settings", "Suppressor", "Stats", "process_array"]
 
 
@@ -90,6 +92,11 @@ class Settings:
     hold_ms: float = 25.0
     """Keep suppressing this long after the detector stops firing (click tails)."""
 
+    typing_gate: bool = True
+    """While nobody is speaking, clamp everything that decays (keystrokes and their
+    room echo) to the room-noise floor. Sustained sounds - the start of a word -
+    are always kept."""
+
     def validate(self) -> "Settings":
         if not 0.0 <= self.keystroke_strength <= 1.0:
             raise ValueError("keystroke_strength must be within 0..1")
@@ -116,6 +123,11 @@ _FUTURE_SPAN_MS = 8.0  # level used as the "sustained" reference for non-decayin
 _PITCH_PERIOD_MS = 14.0  # longest glottal period we protect (deep voices / vocal fry ~ 70 Hz)
 _CLICK_TAIL_MS = 20.0  # a click's own tail: clamped hard; later in an event, sustained sound is protected
 _MAX_BURST_MS = 50.0  # continuous "excess" longer than this is speech/noise, not a keystroke
+_BG_QUANTILE = 0.5  # background = this quantile of the cleaned history
+_GATE_TOLERANCE = 1.6  # typing gate: keep the room tone up to +4 dB above its floor
+_GATE_TRIGGER_DB = 3.0  # typing gate acts only when something sticks out this far above the room
+_GATE_HOLD_MS = 60.0  # ...and for this long afterwards (the click's tail and room echo)
+_SUSTAIN_RATIO = 0.6  # typing gate: a bin is "sustained" if it stays >= -4.4 dB over the look-ahead
 _SMOOTH_HZ = 400.0  # frequency smoothing for the decay test
 _TOLERANCE = 1.2  # +1.6 dB headroom above the reference so natural fluctuation is kept
 _NOISE_BIAS = 2.5  # minimum-statistics bias compensation
@@ -174,6 +186,8 @@ class Suppressor:
         self._floor_pow = _SILENCE_FLOOR**2 * self.n_fft / 2
 
         self._subwin = frames(300.0, 4)  # noise tracker sub-window (~0.3 s, 5 of them)
+        self._vad = VoiceDetector(sample_rate)
+        self._gate_hold_frames = frames(_GATE_HOLD_MS, 1)
         self._min_gain = 10 ** (-s.max_attenuation_db / 20.0)
         self.latency_samples = self.n_fft + self.lookahead * self.hop
         self.reset()
@@ -209,6 +223,10 @@ class Suppressor:
         self._sub_min = np.full(self.n_bins, np.inf)
         self._sub_count = 0
         self._sub_mins: Deque[np.ndarray] = deque(maxlen=5)
+        self._room = _FloorTracker(self.n_bins, self._subwin)
+        self._vad.reset()
+        self._gate_hold = 0
+        self._gate_trig = False
         self.stats = Stats()
         # Pre-roll so the very first frames have a full look-ahead window.
         for _ in range(self.lookahead):
@@ -243,6 +261,7 @@ class Suppressor:
         hop = self.hop
         self._in_buf[:-hop] = self._in_buf[hop:]
         self._in_buf[-hop:] = chunk
+        self._vad.push(chunk)  # sees the newest audio: centred on the frame being output
         spec = np.fft.rfft(self._in_buf * self._win)
         mag = np.abs(spec)
         self._specs.append(spec)
@@ -269,8 +288,13 @@ class Suppressor:
         s = self.settings
         self.stats.frames += 1
         gain = np.ones(self.n_bins)
+        room = self._room.update(mag)
 
-        if s.keystroke_strength > 0 and self._hist_len >= 3:
+        gate_ready = np.isfinite(room[0])  # until the room is known, use the per-keystroke logic
+        if s.keystroke_strength > 0 and s.typing_gate and gate_ready and not self._vad.active:
+            gain = self._typing_gate(mag, smag, room)
+        elif s.keystroke_strength > 0 and self._hist_len >= 3:
+            self._gate_hold = 0
             ahead = np.asarray(self._mags)
             sahead = np.asarray(self._smags)
             fut = np.mean(ahead[-self._fut_k :], axis=0)
@@ -357,6 +381,33 @@ class Suppressor:
             gain = gain * self._noise_gain(clean_mag)
         return gain
 
+    def _typing_gate(self, mag: np.ndarray, smag: np.ndarray, room: np.ndarray) -> np.ndarray:
+        """Nobody is speaking: clamp what decays to the room floor around each event."""
+        # Leave the per-keystroke event logic in a clean state for when a voice returns.
+        self._hold = self._burst = 0
+        self._disarmed = False
+        floor = _GATE_TOLERANCE * room
+        # Only act while something sticks out above the room (and during its
+        # tail), so the room tone between keystrokes is left untouched.
+        triggered = self._band_excess_db(mag, floor) >= _GATE_TRIGGER_DB
+        if triggered:
+            if not self._gate_trig:
+                self.stats.keystrokes += 1  # a new onset (fast keys can share one held event)
+            self._gate_hold = self._gate_hold_frames
+        elif self._gate_hold > 0:
+            self._gate_hold -= 1
+        self._gate_trig = triggered
+        if self._gate_hold == 0:
+            return np.ones(self.n_bins)
+        self.stats.transient_frames += 1
+        sahead = np.asarray(self._smags)
+        # Sustained bins (the start of a word, a hiss like "s") are kept.
+        sustained = np.min(sahead, axis=0) >= _SUSTAIN_RATIO * smag
+        fut = np.mean(np.asarray(self._mags)[-self._fut_k :], axis=0)
+        ref = np.where(sustained, np.maximum(floor, fut), floor)
+        clamp = np.clip(ref / (mag + 1e-12), self._min_gain, 1.0)
+        return 1.0 - self.settings.keystroke_strength * (1.0 - clamp)
+
     def _band_excess_db(self, mag: np.ndarray, ref: np.ndarray) -> float:
         """How far `mag` sticks out above `ref`, in the 2nd-loudest detector band."""
         cur_pow = mag**2 + self._floor_pow
@@ -376,7 +427,7 @@ class Suppressor:
         # The background median moves slowly; refreshing it every other frame
         # (~5 ms) halves the dominant cost with no measurable quality change.
         if self.stats.frames % 2 == 1 or self._hist_len < self.history:
-            k = self._hist_len // 2
+            k = int(self._hist_len * _BG_QUANTILE)
             self._bg = np.partition(self._hist[:, : self._hist_len], k, axis=1)[:, k]
 
     def _noise_gain(self, mag: np.ndarray) -> np.ndarray:
@@ -384,7 +435,7 @@ class Suppressor:
         p = mag**2
         if not np.any(p):  # digital silence: nothing to learn or remove
             return np.ones(self.n_bins)
-        self._psd_smooth = 0.85 * self._psd_smooth + 0.15 * p
+        self._psd_smooth = p if not np.any(self._psd_smooth) else 0.85 * self._psd_smooth + 0.15 * p
         self._sub_min = np.minimum(self._sub_min, self._psd_smooth)
         self._sub_count += 1
         if self._sub_count >= self._subwin:
@@ -401,6 +452,44 @@ class Suppressor:
         g = np.maximum(g, 10 ** (_NOISE_FLOOR_DB * self.settings.noise_reduction / 20.0))
         self._prev_clean_pow = (g**2) * p
         return g
+
+
+class _FloorTracker:
+    """Minimum-statistics estimate of the stationary background magnitude per bin."""
+
+    def __init__(self, n_bins: int, subwin: int):
+        self._smooth = np.zeros(n_bins)
+        self._sub_min = np.full(n_bins, np.inf)
+        self._mins: Deque[np.ndarray] = deque(maxlen=5)
+        self._count = 0
+        self._subwin = subwin
+        self._seen = 0
+        self._floor = np.full(n_bins, np.inf)
+
+    def update(self, mag: np.ndarray) -> np.ndarray:
+        p = mag**2
+        # The zero pre-roll and the first partially-filled analysis windows would
+        # fake a near-zero floor for seconds: skip them (no floor = gate stays off).
+        # Later digital silence is real (e.g. a meeting app's own noise gate).
+        if self._seen == 0 and not np.any(p):
+            return self._floor
+        self._seen += 1
+        if self._seen <= 4:
+            return self._floor
+        self._smooth = p if self._seen == 5 else 0.85 * self._smooth + 0.15 * p
+        self._sub_min = np.minimum(self._sub_min, self._smooth)
+        self._count += 1
+        if self._count >= self._subwin:
+            self._mins.append(self._sub_min)
+            self._sub_min = np.full(self._smooth.size, np.inf)
+            self._count = 0
+        floor = (
+            self._sub_min
+            if not self._mins
+            else np.minimum(self._sub_min, np.min(np.asarray(self._mins), axis=0))
+        )
+        self._floor = np.sqrt(np.maximum(floor * _NOISE_BIAS, 1e-20))
+        return self._floor
 
 
 def process_array(audio: np.ndarray, sample_rate: int, settings: Optional[Settings] = None) -> np.ndarray:

@@ -107,3 +107,38 @@ def test_noise_reduction_off_by_default_leaves_room_tone():
     room = synth.stationary_noise(sr, 4.0, seed=9) * 0.01
     _, (out,) = shadow_process(room, [room], sr)
     assert abs(metrics.reduction_db(room, out)) < 1.5
+
+
+# --------------------------------------------------------------- real keyboards
+DATA = __import__("pathlib").Path(__file__).parent / "data"
+REAL = ["laptop", "computer", "keychron"]
+
+
+@pytest.mark.parametrize("sr", [16000, 48000])
+@pytest.mark.parametrize("name", REAL)
+def test_real_keyboard_recordings(name, sr):
+    """Real typing (see tests/data/README.md), not the keyboard model.
+
+    Real fast typing is dense and reverberant, so removal is lower than on the
+    model (~8-11 dB(A) vs ~25): this guards against regressions."""
+    from clackless.evaluate import load_mono
+
+    x = load_mono(str(DATA / f"keyboard_{name}.flac"), sr)
+    _, (out,) = shadow_process(x, [x], sr)
+    assert metrics.reduction_dba(x, out, sr) >= 7.0
+
+
+@pytest.mark.parametrize("name", REAL)
+def test_real_keyboard_under_a_voice(name):
+    """A voice talking over real typing (as loud as the voice) must survive.
+
+    Known limitation: while the typist talks, real typing only drops a little."""
+    from clackless.evaluate import load_mono
+
+    sr = 48000
+    voice = np.concatenate([np.zeros(sr), synth.speech(sr, 6.0, seed=5)])
+    keys = load_mono(str(DATA / f"keyboard_{name}.flac"), sr)[: voice.size]
+    keys = keys / np.max(np.abs(keys)) * np.max(np.abs(voice))
+    _, (v_out, k_out) = shadow_process(voice + keys, [voice, keys], sr)
+    assert metrics.si_sdr(v_out, voice) >= 15.0
+    assert metrics.reduction_dba(keys, k_out, sr) >= 1.5
