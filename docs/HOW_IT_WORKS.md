@@ -37,7 +37,34 @@ can be detected directly, which keeps Clackless small (NumPy + SciPy), fast
 Speech is different: a vowel lasts 50–300 ms, a word ending fades over tens of
 milliseconds, and voiced speech is *periodic* (a glottal pulse every 2.5–14 ms).
 
-## The algorithm (`src/clackless/dsp.py`)
+## Default: mute between speech
+
+The default for `listen` and `mic` is the simplest effective idea: **when the
+other person isn't speaking, there's nothing to protect, so silence the line**
+(typing, room tone, everything). When they speak, their voice passes through
+untouched.
+
+* **Speech detection**: [Silero VAD](https://github.com/snakers4/silero-vad)
+  v5 (MIT, 2.3 MB ONNX model bundled in `src/clackless/models/`, run with
+  onnxruntime on 32 ms chunks at 16 kHz). Speech starts at probability ≥ 0.6
+  for two chunks or ≥ 0.8 for one (a single 0.5–0.8 blip is a key's "ping"),
+  ends below 0.35, then a 300 ms hold. Measured: real typing < 0.5 % of the
+  time, voices 60–85 %, still ~60–80 % under typing as loud as the voice.
+  A hand-made pitch detector (`VoiceDetector`) is the fallback without
+  onnxruntime; it was replaced as the default because real keyboards produce
+  sustained pure tones (key springs ringing) that fool pitch tracking.
+* **Look-ahead**: frames wait 80 ms before the mute decision, so the line opens
+  *before* each word starts (word-start loss ≤ 0.5 dB in the first 200 ms).
+* **Mute**: everything is turned down to 40 dB below the room level, with an
+  8 ms fade-in and 24 ms fade-out so the switching itself is inaudible.
+* **During speech**: nothing is changed. The per-keystroke logic below was
+  measured to cost natural voices noticeable fidelity (down to ~15 dB SI-SDR)
+  for only ~2 dB(A) less real typing under speech, so it is used only in
+  `--no-mute` mode.
+
+The algorithm below is the `--no-mute` mode (36 ms delay).
+
+## Keystroke suppression (`--no-mute`, `src/clackless/dsp.py`)
 
 Audio is analysed with an STFT (16 ms frames, 75 % overlap) and a 20 ms
 look-ahead. Total added latency is 36 ms. The frame length is the same at

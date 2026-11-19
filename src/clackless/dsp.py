@@ -48,7 +48,7 @@ from typing import Deque, Optional
 import numpy as np
 from scipy.ndimage import uniform_filter1d
 
-from .vad import VoiceDetector
+from .vad import make_voice_detector
 
 __all__ = ["Settings", "Suppressor", "Stats", "process_array"]
 
@@ -92,6 +92,25 @@ class Settings:
     hold_ms: float = 25.0
     """Keep suppressing this long after the detector stops firing (click tails)."""
 
+    mute_between_speech: bool = False
+    """Silence the stream (typing, room tone, everything) whenever nobody is
+    speaking, and pass speech through untouched. Strongest removal of typing
+    while the other person is silent (real keyboards: 50+ dB). Adds 80 ms of
+    delay so the decision can look ahead and keep the very start of each word.
+    Typing *during* speech is left as is."""
+
+    mute_depth_db: float = 40.0
+    """How far below the room level the stream goes while muted."""
+
+    voice_hold_ms: Optional[float] = None
+    """How long after the last detected voice the stream counts as "speaking".
+    Default: 300 ms with muting (short, so typing right after a sentence is
+    silenced), 600 ms otherwise."""
+
+    neural_vad: bool = True
+    """Use the bundled Silero neural voice detector (needs onnxruntime); falls back
+    to the built-in pitch-based detector when it is unavailable."""
+
     typing_gate: bool = True
     """While nobody is speaking, clamp everything that decays (keystrokes and their
     room echo) to the room-noise floor. Sustained sounds - the start of a word -
@@ -104,6 +123,10 @@ class Settings:
             raise ValueError("noise_reduction must be within 0..1")
         if self.detect_high_db <= self.detect_low_db:
             raise ValueError("detect_high_db must be greater than detect_low_db")
+        if not 0.0 <= self.mute_depth_db <= 80.0:
+            raise ValueError("mute_depth_db must be within 0..80")
+        if self.voice_hold_ms is not None and self.voice_hold_ms < 100:
+            raise ValueError("voice_hold_ms must be >= 100")
         if self.lookahead_ms < 5 or self.frame_ms < 4:
             raise ValueError("lookahead_ms must be >= 5 and frame_ms >= 4")
         return self
@@ -114,6 +137,11 @@ class Stats:
     frames: int = 0
     transient_frames: int = 0
     keystrokes: int = 0
+    muted_frames: int = 0
+
+    @property
+    def muted_fraction(self) -> float:
+        return self.muted_frames / self.frames if self.frames else 0.0
 
 
 # Internal constants, tuned with scripts/evaluate.py (see docs/HOW_IT_WORKS.md).
@@ -124,6 +152,7 @@ _PITCH_PERIOD_MS = 14.0  # longest glottal period we protect (deep voices / voca
 _CLICK_TAIL_MS = 20.0  # a click's own tail: clamped hard; later in an event, sustained sound is protected
 _MAX_BURST_MS = 50.0  # continuous "excess" longer than this is speech/noise, not a keystroke
 _BG_QUANTILE = 0.5  # background = this quantile of the cleaned history
+_MUTE_PREROLL_MS = 80.0  # mute: extra delay so a word is unmuted from its very start
 _GATE_TOLERANCE = 1.6  # typing gate: keep the room tone up to +4 dB above its floor
 _GATE_TRIGGER_DB = 3.0  # typing gate acts only when something sticks out this far above the room
 _GATE_HOLD_MS = 60.0  # ...and for this long afterwards (the click's tail and room echo)
@@ -186,13 +215,27 @@ class Suppressor:
         self._floor_pow = _SILENCE_FLOOR**2 * self.n_fft / 2
 
         self._subwin = frames(300.0, 4)  # noise tracker sub-window (~0.3 s, 5 of them)
-        self._vad = VoiceDetector(sample_rate)
+        # When muting, an early (not yet confirmed) voice must hold the stream open
+        # longer: a wrong mute inside a sentence is worse than a short leak.
+        early_hold = 0.5 if s.mute_between_speech else 0.15
+        hold_ms = (
+            s.voice_hold_ms if s.voice_hold_ms is not None else (300.0 if s.mute_between_speech else 600.0)
+        )
+        self._vad = make_voice_detector(
+            sample_rate, hold_s=hold_ms / 1000.0, early_hold_s=early_hold, prefer_neural=s.neural_vad
+        )
         self._gate_hold_frames = frames(_GATE_HOLD_MS, 1)
         self._min_gain = 10 ** (-s.max_attenuation_db / 20.0)
-        self.latency_samples = self.n_fft + self.lookahead * self.hop
+        self._mute_delay = frames(_MUTE_PREROLL_MS, 1) if s.mute_between_speech else 0
+        self.latency_samples = self.n_fft + (self.lookahead + self._mute_delay) * self.hop
         self.reset()
 
     # ------------------------------------------------------------------ API
+    @property
+    def speaking(self) -> bool:
+        """Whether the voice detector currently hears speech (for status displays)."""
+        return bool(self._vad.active)
+
     @property
     def latency_ms(self) -> float:
         return 1000.0 * self.latency_samples / self.sample_rate
@@ -227,6 +270,20 @@ class Suppressor:
         self._vad.reset()
         self._gate_hold = 0
         self._gate_trig = False
+        # Mute stage: frames wait here so the decision can use the voice detector's
+        # verdict from up to `_mute_delay` frames *later* (the start of a word).
+        self._mq: Deque = deque()
+        for _ in range(self._mute_delay):
+            self._mq.append(
+                (
+                    np.zeros(self.n_bins, dtype=complex),
+                    np.ones(self.n_bins),
+                    np.zeros(self.n_bins),
+                    np.full(self.n_bins, np.inf),
+                    False,
+                )
+            )
+        self._mute_mix = 1.0
         self.stats = Stats()
         # Pre-roll so the very first frames have a full look-ahead window.
         for _ in range(self.lookahead):
@@ -276,7 +333,10 @@ class Suppressor:
         if self.settings.bypass:
             out_spec = center_spec
         else:
-            out_spec = center_spec * self._gain(center_mag, center_smag)
+            gain = self._gain(center_mag, center_smag)
+            if self._mute_delay:
+                center_spec, gain = self._mute_stage(center_spec, gain, center_mag)
+            out_spec = self._apply(center_spec, gain)
 
         self._out_acc += np.fft.irfft(out_spec, self.n_fft) * self._win
         out = self._out_acc[:hop] * self._ola_gain
@@ -291,7 +351,17 @@ class Suppressor:
         room = self._room.update(mag)
 
         gate_ready = np.isfinite(room[0])  # until the room is known, use the per-keystroke logic
-        if s.keystroke_strength > 0 and s.typing_gate and gate_ready and not self._vad.active:
+        # With muting on, the (delayed, look-ahead) mute stage handles non-speech, so
+        # the gate is skipped: it would clip the start of a word before the voice
+        # detector has confirmed it.
+        use_gate = s.typing_gate and not s.mute_between_speech
+        if s.mute_between_speech:
+            # Mute mode: non-speech is silenced by the (look-ahead) mute stage and
+            # speech passes untouched. Per-keystroke clamping during speech costs
+            # natural voices noticeable fidelity for ~2 dB on real typing, so it
+            # is not used here.
+            pass
+        elif s.keystroke_strength > 0 and use_gate and gate_ready and not self._vad.active:
             gain = self._typing_gate(mag, smag, room)
         elif s.keystroke_strength > 0 and self._hist_len >= 3:
             self._gate_hold = 0
@@ -380,6 +450,28 @@ class Suppressor:
         if s.noise_reduction > 0:
             gain = gain * self._noise_gain(clean_mag)
         return gain
+
+    def _apply(self, spec: np.ndarray, gain: np.ndarray) -> np.ndarray:
+        """Final gain application (a hook so evaluation can record/replay gains)."""
+        return spec * gain
+
+    def _mute_stage(self, spec: np.ndarray, gain: np.ndarray, mag: np.ndarray):
+        """Delay frames by `_mute_delay`, then silence them unless a voice is
+        present within that window (so the start of every word is kept).
+        Returns the delayed spectrum and its final gain."""
+        self._mq.append((spec, gain, mag, self._room._floor.copy(), self._vad.active))
+        out_spec, out_gain, out_mag, out_room, _ = self._mq.popleft()
+        speaking = any(entry[4] for entry in self._mq) or not np.isfinite(out_room[0])
+        target = 1.0 if speaking else 0.0
+        # Fade in fast (8 ms), out a little slower (24 ms): no clicks of our own.
+        step = 0.5 if target > self._mute_mix else 1.0 / 6
+        self._mute_mix += float(np.clip(target - self._mute_mix, -step, step))
+        if self._mute_mix >= 1.0:
+            return out_spec, out_gain
+        if self._mute_mix <= 0.0:
+            self.stats.muted_frames += 1
+        quiet = np.clip(out_room * 10 ** (-self.settings.mute_depth_db / 20) / (out_mag + 1e-12), 0.0, 1.0)
+        return out_spec, out_gain * (self._mute_mix + (1.0 - self._mute_mix) * quiet)
 
     def _typing_gate(self, mag: np.ndarray, smag: np.ndarray, room: np.ndarray) -> np.ndarray:
         """Nobody is speaking: clamp what decays to the room floor around each event."""

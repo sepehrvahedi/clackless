@@ -142,3 +142,74 @@ def test_real_keyboard_under_a_voice(name):
     _, (v_out, k_out) = shadow_process(voice + keys, [voice, keys], sr)
     assert metrics.si_sdr(v_out, voice) >= 15.0
     assert metrics.reduction_dba(keys, k_out, sr) >= 1.5
+
+
+# ------------------------------------------------------------------ mute mode
+MUTE = Settings(mute_between_speech=True)
+
+
+@pytest.mark.parametrize("name", REAL)
+def test_mute_silences_real_typing(name):
+    """Mute mode: while nobody speaks, real typing all but disappears."""
+    from clackless.evaluate import load_mono
+
+    sr = 48000
+    x = load_mono(str(DATA / f"keyboard_{name}.flac"), sr)
+    _, (out,) = shadow_process(x, [x], sr, MUTE)
+    assert metrics.reduction_dba(x, out, sr) >= 25.0
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_mute_keeps_word_starts(seed, tts_speech):
+    """The look-ahead unmutes before the voice is confirmed: word starts survive."""
+    sr = 48000
+    voice = tts_speech(sr)
+    gap = int((1.0 + 0.3 * seed) * sr)
+    sig = np.concatenate([np.zeros(gap), voice])
+    room = synth.stationary_noise(sr, sig.size / sr + 0.1, seed=seed)[: sig.size] * 1e-3
+    _, (out,) = shadow_process(sig + room, [sig], sr, MUTE)
+    onset = slice(gap, gap + int(0.2 * sr))
+    assert metrics.reduction_db(sig[onset], out[onset]) <= 1.5
+    assert metrics.si_sdr(out, sig) >= 18.0
+
+
+def test_mute_typing_while_you_answer():
+    """She asks, then types while you answer: her typing must be silenced."""
+    sr = 48000
+    from clackless.evaluate import load_mono
+
+    question = synth.speech(sr, 2.5, seed=8)
+    keys = load_mono(str(DATA / "keyboard_computer.flac"), sr)[: 10 * sr]
+    feed = np.concatenate([question, np.zeros(keys.size)])
+    kb = np.concatenate([np.zeros(question.size), keys])
+    _, (q_out, kb_out) = shadow_process(feed + kb, [feed, kb], sr, MUTE)
+    later = slice(question.size + sr, kb.size)  # after the voice detector's hold
+    assert metrics.reduction_dba(kb[later], kb_out[later], sr) >= 25.0
+    assert metrics.si_sdr(q_out[: question.size], feed[: question.size]) >= 18.0
+
+
+def test_mute_latency_bound():
+    from clackless.dsp import Suppressor
+
+    for sr in (16000, 44100, 48000):
+        assert Suppressor(sr, MUTE).latency_ms <= 120.0
+
+
+def test_builtin_voice_detector_fallback():
+    """Without onnxruntime the built-in pitch detector is used and still works."""
+    from clackless.dsp import Suppressor
+    from clackless.vad import VoiceDetector
+
+    sr = 48000
+    st = Settings(neural_vad=False)
+    assert isinstance(Suppressor(sr, st)._vad, VoiceDetector)
+    voice = synth.speech(sr, DUR, seed=3)
+    _, (out,) = shadow_process(voice, [voice], sr, st)
+    assert metrics.si_sdr(out, voice) >= 20.0
+
+
+def test_neural_voice_detector_is_used():
+    from clackless.dsp import Suppressor
+    from clackless.vad import SileroVoiceDetector
+
+    assert isinstance(Suppressor(48000)._vad, SileroVoiceDetector)

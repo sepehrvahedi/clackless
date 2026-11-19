@@ -1,18 +1,18 @@
 # Clackless
 
-**Turn down the other person's keyboard clatter on your calls — and your own on theirs.**
+**Silence the other person's keyboard on your calls — and your own on theirs.**
 
 Clackless sits between your meeting app (Teams, Zoom, Google Meet, Slack, Discord, …) and your
-speakers or microphone, and suppresses keystroke sounds in real time. It runs locally on
-Windows, macOS and Linux, adds about 36 ms of delay, uses a few % of one CPU core, and needs no GPU,
-no account and no internet connection.
+speakers or microphone. While the other person is quiet, a neural voice detector keeps the line
+silent, so their typing simply isn't heard. When they speak, their voice passes through untouched.
+It runs locally on Windows, macOS and Linux, needs no GPU, account or internet connection, and adds
+about 0.1 s of delay.
 
 ![Spectrograms before and after Clackless](docs/spectrogram.png)
 
-*Top: someone typing during a call. Bottom: after Clackless. Left: the typist is silent (e.g. taking
-notes while you talk). Right: typing while talking. This figure uses the keyboard model; on real
-keyboard recordings the clicks end up about half as loud rather than gone (see
-[How well it works](#how-well-it-works)).*
+*Keystroke suppression in `--no-mute` mode, on the keyboard model (top: before, bottom: after). In
+the default mode the left half (typist silent) is simply silent; see
+[How well it works](#how-well-it-works) for measurements on real keyboards.*
 
 ## Why
 
@@ -74,33 +74,38 @@ background-noise reduction (`--noise 0.5`; use `--noise 0` to disable).
 
 ## How well it works
 
-Every number below is reproduced by the test-suite (which CI runs on Windows, macOS and Linux), using
-*shadow filtering*: removal and speech damage are measured separately, on the same processing.
+Every number below is reproduced by the test-suite (which CI runs on Windows, macOS and Linux) on
+**real keyboard recordings** (a laptop, a desktop keyboard and a mechanical Keychron, see
+[tests/data](tests/data/README.md)) and natural voices. Removal and voice damage are measured
+separately on the same processing ("shadow filtering").
 
-**On real keyboard recordings** (a laptop, a desktop keyboard and a mechanical Keychron, see
-[tests/data](tests/data/README.md)):
+### Default: mute between speech (`clackless listen`, `clackless mic`)
 
 | Scenario | Result |
 |---|---|
-| Typing while the typist is silent (main case) | **8–11 dB(A) quieter**: roughly half as loud |
-| Typing while the typist is also talking | 2–5 dB(A) quieter: slightly softer; the voice comes first |
+| They type while you talk (they're silent) | **50+ dB(A) quieter: silent** |
+| Their voice | **passes untouched** (natural voices: 25–150 dB SI-SDR, i.e. identical) |
+| The start of their words | kept (≤ 0.5 dB lost in the first 200 ms) |
+| Right after they stop talking | ~0.3 s of their typing can still come through before the line goes quiet |
+| They type *while* talking | **not removed** (see [Roadmap](#roadmap)) |
+| Their room tone between sentences | silenced too |
+| Added delay | ~116 ms (an 80 ms look-ahead keeps the start of every word) |
 
-**On the evaluation grid** (keyboard model, synthetic + 3 real TTS voices, 16/44.1/48 kHz × 3 seeds):
+How it works: a small neural voice-activity detector ([Silero VAD](https://github.com/snakers4/silero-vad),
+bundled, MIT) decides whether someone is speaking. On real typing it fires < 0.5 % of the time; on
+voices, even under loud typing, 60–85 %. The decision looks 80 ms ahead, so the line opens *before*
+a word starts.
 
-| Scenario | Result | Acceptance threshold |
+### `--no-mute`: lower delay (36 ms), keystroke suppression only
+
+| Scenario | Real keyboards | Keyboard model (evaluation grid) |
 |---|---|---|
-| Typing while the typist is silent | 23.6–26.6 dB(A) quieter | ≥ 18 per case |
-| Room tone while typing | changed by ≤ 1.3 dB | ≤ 2 dB |
-| Speech with no typing (synthetic, macOS, Windows and espeak-ng voices) | 21–40 dB SI-SDR (essentially untouched) | ≥ 20 |
-| Deep voice (80 Hz) / vocal fry (65 Hz), no typing | ≥ 24 / ≥ 18 dB SI-SDR | ≥ 20 / ≥ 15 |
-| Typing while talking | 7–13 dB(A) quieter | ≥ 5 |
-| Speech while typing | 24–36 dB SI-SDR | ≥ 18 |
-| Added latency | 36 ms | ≤ 40 |
-| CPU | 3–7 % of real time | ≤ 25 % |
+| Typing while the typist is silent | 8–11 dB(A) quieter (about half as loud) | 23.6–26.6 dB(A) |
+| Typing while the typist talks | 2–5 dB(A) | 7–13 dB(A) |
+| Room tone | changed by ≤ 1.3 dB | |
+| Speech with no typing | 15–40 dB SI-SDR (natural voices lowest) | ≥ 20 on the grid voices |
 
-Real fast typing is denser and more reverberant than the model (a click every 60–80 ms, ringing in the
-room), which is why real-keyboard numbers are lower: be guided by those. 10 dB(A) quieter sounds
-roughly half as loud. Details of the method and evaluation:
+10 dB(A) quieter sounds roughly half as loud. Details of the method and evaluation:
 [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md). Product requirements:
 [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md).
 
@@ -128,8 +133,10 @@ if you are happy to share it). That is the fastest way to make Clackless better.
 | `clackless devices` | list audio devices (virtual cables are marked) |
 | `clackless setup [--apply\|--remove]` | per-OS setup guide; on Linux creates/removes virtual devices |
 
-Common options: `--strength 0..1` (keystroke suppression, default 1), `--noise 0..1`
-(background-noise reduction), `--samplerate`, `--buffer-ms`. Devices can be given by index or by
+Common options: `--no-mute` (keep the line open between speech; 36 ms delay instead of ~116 ms),
+`--mute-depth DB` (how far to turn it down, default 40), `--strength 0..1` (keystroke suppression
+in `--no-mute` mode), `--noise 0..1` (background-noise reduction), `--samplerate`, `--buffer-ms`.
+`clackless file` takes `--mute` too. Devices can be given by index or by
 part of their name.
 
 ## Privacy
@@ -139,20 +146,28 @@ modes writes nothing to disk.
 
 ## Limitations
 
-* **Real typing is only partly removed.** On real keyboard recordings, clicks become about half as
-  loud (8–11 dB(A)), not silent. Fast, dense typing in a reverberant room is the hard case. Use
-  `clackless record` / `selftest --typing` to measure your keyboard, and please share results.
-* **Typing while talking is reduced only a little** (2–5 dB(A) on real keyboards). Where the voice and
-  a click overlap, the click is left alone on purpose to protect the voice. Very loud typing
-  over a low, buzzy voice can still cost the voice a little fidelity (≈ 17 dB SI-SDR).
-* **Vocal fry** (very low, creaky voice, ~65 Hz) is the hardest case for false detections. It
-  is still protected (≥ 15 dB SI-SDR), with a smaller margin than typical voices.
+* **Typing *while* they talk is not removed** in the default mode: their voice is passed through
+  untouched, and so is whatever is mixed into it. `--no-mute` reduces it a little (2–5 dB(A)). A
+  neural speech enhancer does better (see Roadmap).
+* **~0.3 s of typing right after they stop talking** can come through before the line goes quiet.
+* **Delay**: the default mode adds ~116 ms (the look-ahead that keeps word starts). In a lively
+  conversation you can trade that for `--no-mute` (36 ms, typing only partly removed).
+* **Silence between sentences**: with the default mode their room tone disappears between
+  sentences, like many meeting apps' own noise suppression does.
 * **You need a virtual audio cable** on macOS and Windows (free, one-time install). Use
   separate cables for `listen` and `mic` if you run both.
 * **Linux live routing** relies on PortAudio's ALSA `pulse` device (pipewire-alsa or the
   PulseAudio ALSA plugin). It is covered by unit tests, but has had less real-world use than
   macOS and Windows so far.
-* Bluetooth headsets add their own latency; Clackless's 36 ms comes on top of that.
+* Bluetooth headsets add their own latency on top of Clackless's.
+
+## Roadmap
+
+* **Typing under speech**: a neural speech enhancer. [DeepFilterNet 3](https://github.com/Rikorose/DeepFilterNet)
+  was evaluated on real keyboards under natural voices: it removes ~7.5 dB(A) of the typing (vs ~2 for
+  the DSP), keeps clean voices nearly untouched (29–40 dB SI-SDR) and runs at 4 % of real time on a
+  laptop CPU. Integrating its streaming ONNX models is the next step.
+* A small GUI with a bypass button and a level meter.
 
 ## Development
 

@@ -25,7 +25,13 @@ quick start:
 
 
 def _settings(args) -> Settings:
-    return Settings(keystroke_strength=args.strength, noise_reduction=args.noise).validate()
+    mute = getattr(args, "mute", False)
+    return Settings(
+        keystroke_strength=args.strength,
+        noise_reduction=args.noise,
+        mute_between_speech=mute,
+        mute_depth_db=getattr(args, "mute_depth", 40.0),
+    ).validate()
 
 
 # --------------------------------------------------------------------- devices
@@ -83,11 +89,14 @@ def _resolve_live(args, mode: str):
 
 
 def _render(st) -> None:
-    state = "BYPASS " if st.bypass else "CLEANING"
+    state = "BYPASS " if st.bypass else ("VOICE   " if st.speaking else "QUIET   ")
     level = max(-90.0, st.input_dbfs)
     bar = "#" * int((level + 90) / 6)
+    work = (
+        f"silenced {st.muted_fraction * 100:3.0f}%" if st.muted else f"keystrokes removed {st.keystrokes:5d}"
+    )
     line = (
-        f"\r{state} | in {level:5.1f} dBFS {bar:<15} | keystrokes removed {st.keystrokes:5d} "
+        f"\r{state} | in {level:5.1f} dBFS {bar:<15} | {work} "
         f"| strength {st.keystroke_strength:.1f} noise {st.noise_reduction:.1f} "
         f"| +{st.latency_ms:.0f} ms delay | dropouts {st.underruns + st.overruns}"
     )
@@ -173,7 +182,7 @@ def cmd_file(args) -> int:
     info = sf.info(str(src))
     data, sr = sf.read(str(src), always_2d=True, dtype="float64")
     settings = _settings(args)
-    keystrokes = 0
+    keystrokes, muted = 0, 0.0
     out = np.zeros_like(data)
     for ch in range(data.shape[1]):
         sup = Suppressor(sr, settings)
@@ -181,11 +190,15 @@ def cmd_file(args) -> int:
         y = np.concatenate([sup.process(data[:, ch]), sup.flush()])
         out[:, ch] = y[lat : lat + data.shape[0]]
         keystrokes = max(keystrokes, sup.stats.keystrokes)
+        muted = max(muted, sup.stats.muted_fraction)
     subtype = info.subtype if info.subtype in sf.available_subtypes(dst.suffix[1:].upper() or "WAV") else None
     sf.write(str(dst), np.clip(out, -1.0, 1.0), sr, subtype=subtype)
-    print(
-        f"wrote {dst} ({data.shape[0] / sr:.1f} s, {data.shape[1]} ch, {sr} Hz); keystrokes removed: {keystrokes}"
+    what = (
+        f"silenced {muted * 100:.0f}% of the time (no speech)"
+        if settings.mute_between_speech
+        else (f"keystrokes removed: {keystrokes}")
     )
+    print(f"wrote {dst} ({data.shape[0] / sr:.1f} s, {data.shape[1]} ch, {sr} Hz); {what}")
     return 0
 
 
@@ -290,6 +303,16 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--output", "-o", help="output device index or name (default: auto)")
         sp.add_argument("--samplerate", type=int, default=None, help="force a sample rate")
         sp.add_argument("--buffer-ms", type=float, default=30.0, help="jitter buffer (default 30 ms)")
+        sp.add_argument(
+            "--no-mute",
+            dest="mute",
+            action="store_false",
+            help="don't silence the stream between speech (lower delay: ~36 ms instead of ~116 ms, "
+            "but typing is only partly removed)",
+        )
+        sp.add_argument(
+            "--mute-depth", type=float, default=40.0, help="how far to turn it down between speech, in dB"
+        )
         tuning(sp, noise_default)
         return sp
 
@@ -299,6 +322,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("file", help="clean an audio file")
     sp.add_argument("input")
     sp.add_argument("output")
+    sp.add_argument("--mute", action="store_true", help="silence everything between speech")
     tuning(sp, 0.0)
 
     sp = sub.add_parser("selftest", help="measure suppression on generated speech + typing")

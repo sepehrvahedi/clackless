@@ -20,23 +20,34 @@ __all__ = ["shadow_process", "Check", "run_benchmark", "format_report", "load_mo
 
 
 class _Recorder(Suppressor):
+    """Records the final per-frame gain (after every stage, including muting)."""
+
     def __init__(self, *a, **k):
         self.recorded: List[np.ndarray] = []
         super().__init__(*a, **k)
 
-    def _gain(self, mag, smag):
-        g = super()._gain(mag, smag)
-        self.recorded.append(g)
-        return g
+    def _apply(self, spec, gain):
+        self.recorded.append(gain)
+        return spec * gain
 
 
 class _Replayer(Suppressor):
+    """Applies recorded gains to another signal, frame by frame (same delays)."""
+
     def __init__(self, gains: Sequence[np.ndarray], *a, **k):
         self._it = iter(gains)
         super().__init__(*a, **k)
 
     def _gain(self, mag, smag):
-        return next(self._it)
+        return np.ones(self.n_bins)
+
+    def _mute_stage(self, spec, gain, mag):
+        self._mq.append((spec, gain, mag, None, False))
+        out = self._mq.popleft()
+        return out[0], out[1]
+
+    def _apply(self, spec, gain):
+        return spec * next(self._it)
 
 
 def _run(sup: Suppressor, x: np.ndarray) -> np.ndarray:
@@ -166,8 +177,31 @@ def run_benchmark(
         if save is not None and label == speech_label:
             save["talking_before"], save["talking_after"] = mix, out
 
+    # 4. Mute mode: silence everything between speech (the `listen`/`mic` default).
+    say("scenario: mute between speech")
+    mute = Settings(**{**settings.__dict__, "mute_between_speech": True})
+    mix = typing + room
+    _, (typing_out,) = shadow_process(mix, [typing], sr, mute)
+    checks.append(
+        Check(
+            "Typing removed, mute mode (typist silent)",
+            metrics.reduction_dba(typing, typing_out, sr),
+            "dB(A)",
+            30.0,
+        )
+    )
+    for label, sig in ((speech_label, speech), ("TTS", tts)):
+        if sig is None:
+            continue
+        lead = np.concatenate([np.zeros(sr), sig])  # speech starting after silence
+        _, (out,) = shadow_process(lead, [lead], sr, mute)
+        checks.append(
+            Check(f"Speech preserved, mute mode ({label})", metrics.si_sdr(out, lead), "dB SI-SDR", 18.0)
+        )
+
     checks.append(Check("Real-time factor", rtf, "x", 0.25, False))
     checks.append(Check("Added latency", Suppressor(sr, settings).latency_ms, "ms", 40.0, False))
+    checks.append(Check("Added latency, mute mode", Suppressor(sr, mute).latency_ms, "ms", 120.0, False))
     return checks
 
 

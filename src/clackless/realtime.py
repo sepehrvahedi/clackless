@@ -102,6 +102,10 @@ class LiveStatus:
     (The devices' own latency is not included - the meeting app would incur it anyway.)"""
     keystroke_strength: float
     noise_reduction: float
+    speaking: bool = False
+    muted: bool = False
+    muted_fraction: float = 0.0
+    """The voice detector hears speech (with muting on, everything else is silenced)."""
 
 
 class Pipeline:
@@ -208,6 +212,9 @@ class Pipeline:
             latency_ms=added_ms,
             keystroke_strength=self.settings.keystroke_strength,
             noise_reduction=self.settings.noise_reduction,
+            speaking=self.suppressor.speaking,
+            muted=self.settings.mute_between_speech,
+            muted_fraction=self.suppressor.stats.muted_fraction,
         )
 
     def __enter__(self):
