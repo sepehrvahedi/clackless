@@ -4,9 +4,9 @@
 
 Clackless sits between your meeting app (Teams, Zoom, Google Meet, Slack, Discord, …) and your
 speakers or microphone. While the other person is quiet, a neural voice detector keeps the line
-silent, so their typing simply isn't heard. When they speak, their voice passes through untouched.
-It runs locally on Windows, macOS and Linux, needs no GPU, account or internet connection, and adds
-about 0.1 s of delay.
+silent, so their typing simply isn't heard. When they speak, a neural speech enhancer
+(DeepFilterNet3) strips the typing from under their voice. It runs locally on Windows, macOS and
+Linux, needs no GPU, account or internet connection, and adds about 0.1 s of delay.
 
 ![Spectrograms before and after Clackless](docs/spectrogram.png)
 
@@ -74,29 +74,43 @@ background-noise reduction (`--noise 0.5`; use `--noise 0` to disable).
 
 ## How well it works
 
-Every number below is reproduced by the test-suite (which CI runs on Windows, macOS and Linux) on
-**real keyboard recordings** (a laptop, a desktop keyboard and a mechanical Keychron, see
-[tests/data](tests/data/README.md)) and natural voices. Removal and voice damage are measured
-separately on the same processing ("shadow filtering").
+Every number below comes from **real keyboard recordings** (a laptop, a desktop keyboard and a
+mechanical Keychron, see [tests/data](tests/data/README.md)) and natural voices, and the test-suite
+(which CI runs on Windows, macOS and Linux) guards each one. For the signal processing, removal and
+voice damage are measured separately on the same processing ("shadow filtering"); the neural
+enhancer is measured directly (the voice part of the output is its projection onto the clean voice,
+everything else counts as left-over typing, so the numbers are conservative).
 
 ### Default: mute between speech (`clackless listen`, `clackless mic`)
 
 | Scenario | Result |
 |---|---|
 | They type while you talk (they're silent) | **50+ dB(A) quieter: silent** |
-| Their voice | **passes untouched** (natural voices: 25–150 dB SI-SDR, i.e. identical) |
-| The start of their words | kept (≤ 0.5 dB lost in the first 200 ms) |
-| Right after they stop talking | ~0.3 s of their typing can still come through before the line goes quiet |
-| They type *while* talking | **not removed** (see [Roadmap](#roadmap)) |
-| Their room tone between sentences | silenced too |
-| Added delay | ~116 ms (an 80 ms look-ahead keeps the start of every word) |
+| They type *while* talking (typing as loud as their voice) | **~7.5 dB(A) quieter**, and their voice much clearer: 8 → 17 dB SI-SDR |
+| They type more quietly while talking (half as loud) | ~4.6 dB(A) quieter; voice 14 → 20.5 dB SI-SDR |
+| Their voice with no typing | kept: 24–35 dB SI-SDR on natural voices, the same as without the cleanup |
+| The start of their words | kept (≤ 1.5 dB lost in the first 200 ms) |
+| Right after they stop talking | 40–52 dB(A) quieter (before: 3–26, while the line was still open) |
+| Their room tone and background noise | removed |
+| Your own mic (`mic`): your typing + a fan, while you talk | your voice 2 → 13 dB SI-SDR |
+| Added delay | ~116 ms |
+| CPU | about a quarter of one core on a MacBook Air |
 
-How it works: a small neural voice-activity detector ([Silero VAD](https://github.com/snakers4/silero-vad),
-bundled, MIT) decides whether someone is speaking. On real typing it fires < 0.5 % of the time; on
-voices, even under loud typing, 60–85 %. The decision looks 80 ms ahead, so the line opens *before*
-a word starts.
+How it works, in two stages:
 
-### `--no-mute`: lower delay (36 ms), keystroke suppression only
+1. **Between speech, silence.** A small neural voice-activity detector
+   ([Silero VAD](https://github.com/snakers4/silero-vad), bundled, MIT) decides whether someone is
+   speaking. On real typing it fires < 0.5 % of the time; on voices, even under loud typing,
+   60–85 %. The decision looks 80 ms ahead, so the line opens *before* a word starts.
+2. **During speech, clean the voice.** [DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet)
+   (bundled, MIT/Apache-2.0), streamed in 10 ms steps, rebuilds the voice and drops what isn't voice:
+   typing, hum, fans. It needs 40 ms, which comes out of the 80 ms look-ahead, so the total delay
+   is the same as without it. `--no-enhance` turns it off.
+
+### `--no-mute --no-enhance`: lowest delay (36 ms), keystroke suppression only
+
+`--no-mute` alone keeps the neural cleanup (76 ms): real typing while the typist is silent then
+drops 48–52 dB(A).
 
 | Scenario | Real keyboards | Keyboard model (evaluation grid) |
 |---|---|---|
@@ -133,10 +147,11 @@ if you are happy to share it). That is the fastest way to make Clackless better.
 | `clackless devices` | list audio devices (virtual cables are marked) |
 | `clackless setup [--apply\|--remove]` | per-OS setup guide; on Linux creates/removes virtual devices |
 
-Common options: `--no-mute` (keep the line open between speech; 36 ms delay instead of ~116 ms),
-`--mute-depth DB` (how far to turn it down, default 40), `--strength 0..1` (keystroke suppression
-in `--no-mute` mode), `--noise 0..1` (background-noise reduction), `--samplerate`, `--buffer-ms`.
-`clackless file` takes `--mute` too. Devices can be given by index or by
+Common options: `--no-mute` (keep the line open between speech; 76 ms delay instead of ~116 ms),
+`--no-enhance` (turn off the neural voice cleanup: less CPU, and 36 ms with `--no-mute`),
+`--mute-depth DB` (how far to turn it down, default 40), `--strength 0..1` (keystroke suppression),
+`--noise 0..1` (extra background-noise reduction; default 0, or 0.5 for `mic --no-enhance`),
+`--samplerate`, `--buffer-ms`. `clackless file` takes `--mute` and `--no-enhance` too. Devices can be given by index or by
 part of their name.
 
 ## Privacy
@@ -146,12 +161,13 @@ modes writes nothing to disk.
 
 ## Limitations
 
-* **Typing *while* they talk is not removed** in the default mode: their voice is passed through
-  untouched, and so is whatever is mixed into it. `--no-mute` reduces it a little (2–5 dB(A)). A
-  neural speech enhancer does better (see Roadmap).
-* **~0.3 s of typing right after they stop talking** can come through before the line goes quiet.
+* **Typing *while* they talk is reduced, not removed**: ~7.5 dB(A) for typing as loud as their
+  voice (it sounds about half as loud). Keystrokes that land exactly on a vowel are the hardest.
 * **Delay**: the default mode adds ~116 ms (the look-ahead that keeps word starts). In a lively
-  conversation you can trade that for `--no-mute` (36 ms, typing only partly removed).
+  conversation you can trade that for `--no-mute` (76 ms) or `--no-mute --no-enhance` (36 ms,
+  typing only partly removed).
+* **CPU**: the neural cleanup needs about an eighth of one core (MacBook Air); on old machines use
+  `--no-enhance` if you hear dropouts.
 * **Silence between sentences**: with the default mode their room tone disappears between
   sentences, like many meeting apps' own noise suppression does.
 * **You need a virtual audio cable** on macOS and Windows (free, one-time install). Use
@@ -163,10 +179,8 @@ modes writes nothing to disk.
 
 ## Roadmap
 
-* **Typing under speech**: a neural speech enhancer. [DeepFilterNet 3](https://github.com/Rikorose/DeepFilterNet)
-  was evaluated on real keyboards under natural voices: it removes ~7.5 dB(A) of the typing (vs ~2 for
-  the DSP), keeps clean voices nearly untouched (29–40 dB SI-SDR) and runs at 4 % of real time on a
-  laptop CPU. Integrating its streaming ONNX models is the next step.
+* **More removal under speech**: a model trained specifically on keyboard noise (DeepFilterNet3
+  is a general speech enhancer).
 * A small GUI with a bypass button and a level meter.
 
 ## Development
@@ -175,7 +189,7 @@ modes writes nothing to disk.
 git clone https://github.com/sepehrvahedi/clackless && cd clackless
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
-pytest                       # ~100 tests: DSP invariants, effectiveness, real-time, CLI
+pytest                       # ~150 tests: DSP invariants, effectiveness, neural cleanup, real-time, CLI
 python scripts/evaluate.py   # the full evaluation grid; run before/after any DSP change
 ```
 

@@ -48,6 +48,7 @@ from typing import Deque, Optional
 import numpy as np
 from scipy.ndimage import uniform_filter1d
 
+from .enhance import make_enhancer
 from .vad import make_voice_detector
 
 __all__ = ["Settings", "Suppressor", "Stats", "process_array"]
@@ -110,6 +111,12 @@ class Settings:
     neural_vad: bool = True
     """Use the bundled Silero neural voice detector (needs onnxruntime); falls back
     to the built-in pitch-based detector when it is unavailable."""
+
+    enhance_speech: bool = False
+    """Run the bundled DeepFilterNet3 neural speech enhancer first (needs
+    onnxruntime). It removes typing and background noise *under* a voice, which
+    the rest of the pipeline leaves alone. Adds 40 ms; with muting on, the mute
+    look-ahead shrinks by the same amount, so the total stays the same."""
 
     typing_gate: bool = True
     """While nobody is speaking, clamp everything that decays (keystrokes and their
@@ -226,8 +233,13 @@ class Suppressor:
         )
         self._gate_hold_frames = frames(_GATE_HOLD_MS, 1)
         self._min_gain = 10 ** (-s.max_attenuation_db / 20.0)
-        self._mute_delay = frames(_MUTE_PREROLL_MS, 1) if s.mute_between_speech else 0
-        self.latency_samples = self.n_fft + (self.lookahead + self._mute_delay) * self.hop
+        # The enhancer delays the audio but not the voice detector (it hears the
+        # raw input), which already gives the mute decision that much look-ahead.
+        self._enhancer = make_enhancer(sample_rate) if s.enhance_speech else None
+        enh_latency = self._enhancer.latency_samples if self._enhancer else 0
+        preroll_ms = _MUTE_PREROLL_MS - 1000.0 * enh_latency / sample_rate
+        self._mute_delay = frames(preroll_ms, 1) if s.mute_between_speech else 0
+        self.latency_samples = enh_latency + self.n_fft + (self.lookahead + self._mute_delay) * self.hop
         self.reset()
 
     # ------------------------------------------------------------------ API
@@ -235,6 +247,11 @@ class Suppressor:
     def speaking(self) -> bool:
         """Whether the voice detector currently hears speech (for status displays)."""
         return bool(self._vad.active)
+
+    @property
+    def enhancing(self) -> bool:
+        """Whether the neural speech enhancer is running."""
+        return self._enhancer is not None
 
     @property
     def latency_ms(self) -> float:
@@ -245,6 +262,9 @@ class Suppressor:
         self._in_buf = np.zeros(self.n_fft)
         self._out_acc = np.zeros(self.n_fft)
         self._in_fifo = np.zeros(0)
+        self._vad_fifo = np.zeros(0)
+        if self._enhancer is not None:
+            self._enhancer.reset()
         self._out_fifo = np.zeros(self.hop)
         self._specs: Deque[np.ndarray] = deque()
         self._mags: Deque[np.ndarray] = deque()
@@ -298,11 +318,19 @@ class Suppressor:
         if n == 0:
             return np.zeros(0, dtype=np.float32)
         x = np.clip(np.nan_to_num(x, nan=0.0, posinf=1.0, neginf=-1.0), -4.0, 4.0)
+        # The voice detector always hears the raw input (same length, so the two
+        # FIFOs stay in step); the spectral stage works on the enhanced signal.
+        vad_fifo = np.concatenate([self._vad_fifo, x])
+        if self._enhancer is not None:
+            x = self._enhancer.process(x, bypass=self.settings.bypass)
         fifo = np.concatenate([self._in_fifo, x])
         hop = self.hop
         steps = fifo.size // hop
-        produced = [self._step(fifo[i * hop : (i + 1) * hop]) for i in range(steps)]
+        produced = [
+            self._step(fifo[i * hop : (i + 1) * hop], vad_fifo[i * hop : (i + 1) * hop]) for i in range(steps)
+        ]
         self._in_fifo = fifo[steps * hop :].copy()
+        self._vad_fifo = vad_fifo[steps * hop :].copy()
         if produced:
             self._out_fifo = np.concatenate([self._out_fifo, *produced])
         out = self._out_fifo[:n]
@@ -314,11 +342,11 @@ class Suppressor:
         return self.process(np.zeros(self.latency_samples))
 
     # ------------------------------------------------------------- internals
-    def _step(self, chunk: np.ndarray) -> np.ndarray:
+    def _step(self, chunk: np.ndarray, vad_chunk: np.ndarray) -> np.ndarray:
         hop = self.hop
         self._in_buf[:-hop] = self._in_buf[hop:]
         self._in_buf[-hop:] = chunk
-        self._vad.push(chunk)  # sees the newest audio: centred on the frame being output
+        self._vad.push(vad_chunk)  # the newest raw audio: ahead of the frame being output
         spec = np.fft.rfft(self._in_buf * self._win)
         mag = np.abs(spec)
         self._specs.append(spec)

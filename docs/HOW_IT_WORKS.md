@@ -17,13 +17,16 @@ Input and output are two independent PortAudio streams joined by a 30 ms
 jitter buffer that absorbs scheduling jitter and the clock drift between two
 devices (it pads on underrun, drops on overrun, and counts both).
 
-## Why DSP and not a neural network
+## DSP and neural networks
 
-Neural denoisers (RNNoise, DeepFilterNet, NVIDIA Broadcast, Krisp) are good,
-but they need model files, sometimes a GPU, and they are trained mainly for
-*stationary* noise. A keystroke has a very specific, physical signature that
-can be detected directly, which keeps Clackless small (NumPy + SciPy), fast
-(about 2 % of one CPU core), explainable, and testable.
+Clackless started as pure signal processing: a keystroke has a very specific,
+physical signature that can be detected directly, which is small, fast (about
+2 % of one CPU core), explainable and testable. That still powers `--no-mute
+--no-enhance`. Measured on real keyboards, though, two problems needed more:
+telling a voice from typing reliably (solved by a small neural voice detector,
+below), and removing typing that overlaps a voice (solved by a neural speech
+enhancer, below). Both are small ONNX models bundled with the package and run
+on the CPU with onnxruntime, so there is still no GPU, download or account.
 
 ## What a keystroke looks like
 
@@ -57,12 +60,40 @@ untouched.
   *before* each word starts (word-start loss ≤ 0.5 dB in the first 200 ms).
 * **Mute**: everything is turned down to 40 dB below the room level, with an
   8 ms fade-in and 24 ms fade-out so the switching itself is inaudible.
-* **During speech**: nothing is changed. The per-keystroke logic below was
-  measured to cost natural voices noticeable fidelity (down to ~15 dB SI-SDR)
-  for only ~2 dB(A) less real typing under speech, so it is used only in
-  `--no-mute` mode.
+* **During speech**: the per-keystroke logic below is not used (it cost natural
+  voices noticeable fidelity, down to ~15 dB SI-SDR, for only ~2 dB(A) less
+  real typing under speech). The neural enhancer does that job instead.
 
-The algorithm below is the `--no-mute` mode (36 ms delay).
+## Neural voice cleanup: typing under speech (`src/clackless/enhance.py`)
+
+[DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet) (Schröter et al.,
+MIT / Apache-2.0) is a speech enhancer: every 10 ms it predicts gains for 32
+ERB bands (what is voice, what is not) and, below 5 kHz, a 5-tap complex
+filter across the last frames that rebuilds the voice's fine structure. It
+treats typing like any other non-voice sound.
+
+* **Streaming**: the official weights are exported by
+  `scripts/export_deepfilternet.py` into a single ONNX graph that takes 480
+  samples (10 ms at 48 kHz) plus the network's recurrent state and returns 10 ms
+  of output plus the new state. STFT, features, the three networks and
+  overlap-add are all inside the graph. The export matches the official
+  offline enhancer within 38.6 dB SNR, and onnxruntime matches PyTorch to 2e-8.
+* **Delay**: 40 ms (a 10 ms framing buffer, a 20 ms window and 2 frames of
+  look-ahead). It sits in front of the mute stage, but the voice detector hears
+  the *raw* input, so the mute stage's own look-ahead shrinks by those 40 ms:
+  the total stays ~116 ms.
+* **Other sample rates** are resampled to 48 kHz and back with a stateful
+  polyphase filter (16 taps each side, Kaiser β = 8) whose group delay is a
+  whole number of samples, so the delay stays exact and output is identical for
+  any block size.
+* **Cost**: 13 % of one core on a MacBook Air (whole default pipeline: 25 %).
+* **Measured** (real keyboards as loud as natural voices, while the voice
+  talks): typing 7.5 dB(A) quieter, voice 8 → 17 dB SI-SDR; typing right after
+  speech stops (while the line is still open) 40–52 dB(A) quieter; clean voices
+  unchanged (24–35 dB SI-SDR either way). Running the enhancer twice was tried
+  and adds nothing (6.9 vs 6.7 dB(A)).
+
+The algorithm below is the `--no-mute --no-enhance` mode (36 ms delay).
 
 ## Keystroke suppression (`--no-mute`, `src/clackless/dsp.py`)
 
@@ -161,9 +192,8 @@ click or echo to "protect".
 * On real keyboards, clicks end up about half as loud (8–11 dB(A)), not
   silent. Use `clackless record` + `clackless selftest --typing` to measure
   yours, and please share results in an issue.
-* Typing *while the typist talks* is only reduced (≈ 7–13 dB(A) on the model,
-  2–5 dB(A) on real keyboards), not removed:
-  where the voice is louder than the click, the click is left alone on purpose.
+* Typing *while the typist talks* is reduced, not removed: ~7.5 dB(A) on real
+  keyboards with the neural cleanup (default), 2–5 dB(A) without it.
 * Vocal fry (~65 Hz) is the hardest case for false detections (≥ 15 dB SI-SDR;
   deep 80 Hz voices and typical voices ≥ 20 dB).
 * 8 kHz telephone-band audio has fewer cues (≈ 15 dB(A) removal).

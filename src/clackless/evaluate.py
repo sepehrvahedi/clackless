@@ -4,11 +4,17 @@ The suppressor is non-linear, so to measure "how much keyboard was removed"
 and "how much speech was damaged" separately we use *shadow filtering*: the
 gains are computed on the mixture, then exactly the same gains are applied to
 each clean component on its own.
+
+The neural speech enhancer is not a per-bin gain, so shadow filtering cannot
+split its output. It is measured directly instead (section 5 of the benchmark):
+the voice part of the output is its projection onto the clean voice, and the
+remainder counts as left-over typing (conservative: it includes any voice
+distortion too).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -62,7 +68,9 @@ def shadow_process(
     sample_rate: int,
     settings: Optional[Settings] = None,
 ) -> Tuple[np.ndarray, List[np.ndarray]]:
-    """Process `mixture`, then replay the identical gains on each component."""
+    """Process `mixture`, then replay the identical gains on each component.
+    (Without the neural enhancer, which cannot be split this way.)"""
+    settings = replace(settings or Settings(), enhance_speech=False)
     rec = _Recorder(sample_rate, settings)
     out = _run(rec, np.asarray(mixture, dtype=np.float64))
     outs = [
@@ -110,7 +118,8 @@ def run_benchmark(
     sr = sample_rate
     say = progress or (lambda _m: None)
     checks: List[Check] = []
-    settings = settings or Settings()
+    full = settings or Settings(enhance_speech=True)
+    settings = replace(full, enhance_speech=False)  # sections 1-4: the signal processing alone
 
     real_typing = typing_recording is not None
     if real_typing:
@@ -202,7 +211,63 @@ def run_benchmark(
     checks.append(Check("Real-time factor", rtf, "x", 0.25, False))
     checks.append(Check("Added latency", Suppressor(sr, settings).latency_ms, "ms", 40.0, False))
     checks.append(Check("Added latency, mute mode", Suppressor(sr, mute).latency_ms, "ms", 120.0, False))
+
+    # 5. The `listen`/`mic` default: mute mode with the neural voice cleanup.
+    best = replace(full, mute_between_speech=True, enhance_speech=True)
+    if full.enhance_speech and Suppressor(sr, best).enhancing:
+        say("scenario: neural voice cleanup (default)")
+        mix = typing + room
+        t0 = time.perf_counter()
+        out = _run(Suppressor(sr, best), mix)
+        rtf = (time.perf_counter() - t0) / duration
+        checks.append(
+            Check(
+                "Typing removed, default (typist silent)",
+                metrics.reduction_dba(typing, out, sr),
+                "dB(A)",
+                40.0,
+            )
+        )
+        for label, sig in ((speech_label, speech), ("TTS", tts)):
+            if sig is None:
+                continue
+            lead = np.concatenate([np.zeros(sr), sig])
+            out = _run(Suppressor(sr, best), lead)
+            checks.append(
+                Check(f"Speech preserved, default ({label})", metrics.si_sdr(out, lead), "dB SI-SDR", 15.0)
+            )
+            say(f"scenario: typing while talking, default ({label})")
+            mix, kb = synth.mix(sig, typing, 0.0)
+            ref = sig[: mix.size]
+            out = _run(Suppressor(sr, best), mix)
+            voice, rest = split_voice(out, ref)
+            checks.append(
+                Check(
+                    f"Typing removed while talking, default ({label})",
+                    metrics.reduction_dba(kb, rest, sr),
+                    "dB(A)",
+                    5.0,
+                )
+            )
+            checks.append(
+                Check(
+                    f"Speech preserved while typing, default ({label})",
+                    metrics.si_sdr(out, ref),
+                    "dB SI-SDR",
+                    12.0,
+                )
+            )
+            if save is not None and label == speech_label:
+                save["talking_after_default"] = out
+        checks.append(Check("Real-time factor, default", rtf, "x", 0.7, False))
+        checks.append(Check("Added latency, default", Suppressor(sr, best).latency_ms, "ms", 120.0, False))
     return checks
+
+
+def split_voice(out: np.ndarray, voice: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Split a processed mixture into (the part explained by the clean voice, the rest)."""
+    a = float(np.dot(out, voice) / (np.dot(voice, voice) + 1e-12))
+    return a * voice, out - a * voice
 
 
 def _fit(x: np.ndarray, n: int) -> np.ndarray:

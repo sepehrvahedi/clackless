@@ -26,11 +26,16 @@ quick start:
 
 def _settings(args) -> Settings:
     mute = getattr(args, "mute", False)
+    enhance = getattr(args, "enhance", True)
+    noise = args.noise
+    if noise is None:  # the neural cleanup already removes steady noise
+        noise = 0.0 if enhance else getattr(args, "noise_without_enhance", 0.0)
     return Settings(
         keystroke_strength=args.strength,
-        noise_reduction=args.noise,
+        noise_reduction=noise,
         mute_between_speech=mute,
         mute_depth_db=getattr(args, "mute_depth", 40.0),
+        enhance_speech=enhance,
     ).validate()
 
 
@@ -90,6 +95,8 @@ def _resolve_live(args, mode: str):
 
 def _render(st) -> None:
     state = "BYPASS " if st.bypass else ("VOICE   " if st.speaking else "QUIET   ")
+    if st.enhancing and not st.bypass:
+        state += "+AI "
     level = max(-90.0, st.input_dbfs)
     bar = "#" * int((level + 90) / 6)
     work = (
@@ -139,18 +146,19 @@ def cmd_live(args, mode: str) -> int:
     what = "meeting audio you hear" if mode == "listen" else "microphone audio you send"
     print(f"Clackless {__version__} - cleaning the {what}")
     print(f"  from: {inp.name}  ->  to: {out.name}  @ {sr} Hz")
+    settings = _settings(args)
     print("  commands: b+Enter bypass on/off | +/- strength | n+/n- noise reduction | q quit | Ctrl+C\n")
 
     stop = threading.Event()
     try:
-        pipeline = Pipeline(
-            inp, out, sr, _settings(args), buffer_ms=args.buffer_ms, allow_same_device=allow_same
-        )
+        pipeline = Pipeline(inp, out, sr, settings, buffer_ms=args.buffer_ms, allow_same_device=allow_same)
         pipeline.start()
     except Exception as exc:  # PortAudio errors are not typed
         print(f"error: could not open audio devices: {exc}", file=sys.stderr)
         return 2
 
+    if settings.enhance_speech and not pipeline.status().enhancing:
+        print("  note: neural voice cleanup unavailable (onnxruntime missing); typing under speech stays.\n")
     if sys.stdin and sys.stdin.isatty():
         threading.Thread(target=_keyboard_loop, args=(pipeline, stop), daemon=True).start()
     try:
@@ -288,13 +296,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", action="version", version=f"clackless {__version__}")
     sub = p.add_subparsers(dest="command", metavar="command")
 
-    def tuning(sp, noise_default: float):
+    def tuning(sp, noise_default: float = 0.0):
         sp.add_argument("--strength", type=float, default=1.0, help="keystroke suppression 0..1 (default 1)")
         sp.add_argument(
             "--noise",
             type=float,
-            default=noise_default,
-            help=f"stationary noise reduction 0..1 (default {noise_default})",
+            default=None,
+            help="extra stationary noise reduction 0..1 (default 0"
+            + (f"; {noise_default} with --no-enhance)" if noise_default else ")"),
+        )
+
+    def no_enhance(sp):
+        sp.add_argument(
+            "--no-enhance",
+            dest="enhance",
+            action="store_false",
+            help="turn off the neural voice cleanup (DeepFilterNet3) that removes typing and noise "
+            "under speech (saves CPU, and 40 ms of delay with --no-mute)",
         )
 
     def live(name, help_, noise_default):
@@ -307,13 +325,15 @@ def build_parser() -> argparse.ArgumentParser:
             "--no-mute",
             dest="mute",
             action="store_false",
-            help="don't silence the stream between speech (lower delay: ~36 ms instead of ~116 ms, "
-            "but typing is only partly removed)",
+            help="don't silence the stream between speech (lower delay: ~76 ms instead of ~116 ms, "
+            "but typing while nobody talks is only partly removed)",
         )
+        no_enhance(sp)
         sp.add_argument(
             "--mute-depth", type=float, default=40.0, help="how far to turn it down between speech, in dB"
         )
         tuning(sp, noise_default)
+        sp.set_defaults(noise_without_enhance=noise_default)
         return sp
 
     live("listen", "clean incoming meeting audio (virtual cable -> your speakers)", 0.0)
@@ -323,6 +343,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("input")
     sp.add_argument("output")
     sp.add_argument("--mute", action="store_true", help="silence everything between speech")
+    no_enhance(sp)
     tuning(sp, 0.0)
 
     sp = sub.add_parser("selftest", help="measure suppression on generated speech + typing")

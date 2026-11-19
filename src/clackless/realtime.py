@@ -106,6 +106,8 @@ class LiveStatus:
     muted: bool = False
     muted_fraction: float = 0.0
     """The voice detector hears speech (with muting on, everything else is silenced)."""
+    enhancing: bool = False
+    """The neural voice cleanup is running."""
 
 
 class Pipeline:
@@ -215,6 +217,7 @@ class Pipeline:
             speaking=self.suppressor.speaking,
             muted=self.settings.mute_between_speech,
             muted_fraction=self.suppressor.stats.muted_fraction,
+            enhancing=self.suppressor.enhancing,
         )
 
     def __enter__(self):
