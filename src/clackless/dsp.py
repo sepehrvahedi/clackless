@@ -49,6 +49,7 @@ import numpy as np
 from scipy.ndimage import uniform_filter1d
 
 from .enhance import make_enhancer
+from .keyboard import make_keyboard_detector
 from .vad import make_voice_detector
 
 __all__ = ["Settings", "Suppressor", "Stats", "process_array"]
@@ -117,6 +118,12 @@ class Settings:
     onnxruntime). It removes typing and background noise *under* a voice, which
     the rest of the pipeline leaves alone. Adds 40 ms; with muting on, the mute
     look-ahead shrinks by the same amount, so the total stays the same."""
+
+    only_while_typing: bool = True
+    """With ``enhance_speech``: leave the audio untouched unless typing is heard,
+    and clean it from just before each keystroke until 1 s after the last one.
+    A voice nobody types over is never processed, so no sound of it is lost.
+    Without the enhancer the cleanup runs all the time."""
 
     typing_gate: bool = True
     """While nobody is speaking, clamp everything that decays (keystrokes and their
@@ -239,7 +246,16 @@ class Suppressor:
         enh_latency = self._enhancer.latency_samples if self._enhancer else 0
         preroll_ms = _MUTE_PREROLL_MS - 1000.0 * enh_latency / sample_rate
         self._mute_delay = frames(preroll_ms, 1) if s.mute_between_speech else 0
-        self.latency_samples = enh_latency + self.n_fft + (self.lookahead + self._mute_delay) * self.hop
+        spectral_delay = self.n_fft + (self.lookahead + self._mute_delay) * self.hop
+        self.latency_samples = enh_latency + spectral_delay
+        # Keystrokes are heard in what the enhancer removes, then the spectral
+        # stage's own delay lets the cleanup switch on before the first one plays.
+        self._keys = (
+            make_keyboard_detector(sample_rate, spectral_delay)
+            if self._enhancer is not None and s.only_while_typing
+            else None
+        )
+        self._spectral_delay = spectral_delay
         self.reset()
 
     # ------------------------------------------------------------------ API
@@ -254,6 +270,28 @@ class Suppressor:
         return self._enhancer is not None
 
     @property
+    def gated(self) -> bool:
+        """Whether the cleanup only runs while typing is heard."""
+        return self._keys is not None
+
+    @property
+    def typing(self) -> bool:
+        """Whether the cleanup is currently on (always, unless gated)."""
+        return self._keys is None or self._keys.active
+
+    @property
+    def keystrokes(self) -> int:
+        """Keystrokes heard so far."""
+        return self._keys.keystrokes if self._keys is not None else self.stats.keystrokes
+
+    @property
+    def typing_fraction(self) -> float:
+        """Share of the time the cleanup was on."""
+        if self._keys is None:
+            return 1.0
+        return self._keys.on_frames / self._keys.emitted_frames if self._keys.emitted_frames else 0.0
+
+    @property
     def latency_ms(self) -> float:
         return 1000.0 * self.latency_samples / self.sample_rate
 
@@ -265,6 +303,12 @@ class Suppressor:
         self._vad_fifo = np.zeros(0)
         if self._enhancer is not None:
             self._enhancer.reset()
+        if self._keys is not None:
+            self._keys.reset()
+        # Gated mode: the untouched input and the mix envelope, both waiting
+        # for the spectral stage's delay so they line up with its output.
+        self._raw_out = np.zeros(self._spectral_delay)
+        self._mix_out = np.ones(self._spectral_delay)
         self._out_fifo = np.zeros(self.hop)
         self._specs: Deque[np.ndarray] = deque()
         self._mags: Deque[np.ndarray] = deque()
@@ -321,8 +365,13 @@ class Suppressor:
         # The voice detector always hears the raw input (same length, so the two
         # FIFOs stay in step); the spectral stage works on the enhanced signal.
         vad_fifo = np.concatenate([self._vad_fifo, x])
+        raw = None
         if self._enhancer is not None:
-            x = self._enhancer.process(x, bypass=self.settings.bypass)
+            enhanced, raw = self._enhancer.process_pair(x)
+            if self._keys is not None:
+                self._raw_out = np.concatenate([self._raw_out, raw])
+                self._mix_out = np.concatenate([self._mix_out, self._keys.push(raw, enhanced)])
+            x = raw if self.settings.bypass else enhanced
         fifo = np.concatenate([self._in_fifo, x])
         hop = self.hop
         steps = fifo.size // hop
@@ -335,6 +384,8 @@ class Suppressor:
             self._out_fifo = np.concatenate([self._out_fifo, *produced])
         out = self._out_fifo[:n]
         self._out_fifo = self._out_fifo[n:]
+        if self._keys is not None:
+            out = self._gate(out, n)
         return out.astype(np.float32)
 
     def flush(self) -> np.ndarray:
@@ -342,6 +393,16 @@ class Suppressor:
         return self.process(np.zeros(self.latency_samples))
 
     # ------------------------------------------------------------- internals
+    def _gate(self, cleaned: np.ndarray, n: int) -> np.ndarray:
+        """Cross-fade between the untouched input and the cleaned audio."""
+        raw, self._raw_out = self._raw_out[:n], self._raw_out[n:]
+        mix, self._mix_out = self._mix_out[:n], self._mix_out[n:]
+        if self.settings.bypass:
+            return raw
+        if mix.size < n:  # the delay always covers the detector; never leak if it did not
+            mix = np.concatenate([mix, np.ones(n - mix.size)])
+        return raw + mix * (cleaned - raw)
+
     def _step(self, chunk: np.ndarray, vad_chunk: np.ndarray) -> np.ndarray:
         hop = self.hop
         self._in_buf[:-hop] = self._in_buf[hop:]

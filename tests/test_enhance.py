@@ -13,7 +13,7 @@ import pytest
 from clackless import metrics, synth
 from clackless.dsp import Settings, Suppressor, process_array
 from clackless.enhance import SpeechEnhancer
-from clackless.evaluate import load_mono, split_voice
+from clackless.evaluate import load_mono, split_voice, typing_mask
 
 DATA = Path(__file__).parent / "data"
 REAL = ["laptop", "computer", "keychron"]
@@ -74,9 +74,65 @@ def test_typing_under_a_voice_is_reduced(tts_speech):
 
 @pytest.mark.parametrize("name", REAL)
 def test_default_silences_real_typing(name):
+    """Every keystroke; the room tone between bursts of typing is (rightly) kept."""
     sr = 48000
     x = load_mono(str(DATA / f"keyboard_{name}.flac"), sr)
-    assert metrics.reduction_dba(x, process_array(x, sr, DEFAULT), sr) >= 40.0
+    keys = typing_mask(x, sr)
+    y = process_array(x, sr, DEFAULT)
+    assert metrics.reduction_dba(x[keys], y[keys], sr) >= 40.0  # measured 89-100
+
+
+def _untouched(y, x):
+    """Share of the samples that come out exactly as they went in."""
+    return float(np.mean(np.abs(y - x) < 1e-5))
+
+
+def test_a_voice_nobody_types_over_is_not_processed(tts_speech):
+    """No typing, no cleanup: every sound of the voice passes as it came in
+    (after the first second, which is cleaned in case a stream starts mid-typing)."""
+    sr = 48000
+    x = np.concatenate([np.zeros(2 * sr), tts_speech(sr)])
+    x = x + synth.stationary_noise(sr, x.size / sr + 0.1, seed=4)[: x.size] * 1e-3
+    y = process_array(x, sr, DEFAULT)
+    assert _untouched(y[2 * sr :], x[2 * sr :]) >= 0.8  # measured 1.0; a false click would cost ~1 s
+
+
+def test_typing_mid_sentence_is_cleaned_from_its_first_keystroke():
+    """She talks, then starts typing mid-sentence: the voice before it is
+    untouched, and the cleanup is on before the first click is heard."""
+    sr = 48000
+    voice = synth.speech(sr, 8.0, seed=3)
+    typing, onsets = synth.keyboard(sr, 3.0, seed=5)
+    start = 4 * sr - onsets[0]  # first keystroke at 4 s
+    kb = np.zeros(voice.size)
+    kb[start : start + typing.size] = typing
+    x = voice + kb
+    gated = process_array(x, sr, DEFAULT)
+    always = process_array(
+        x, sr, Settings(mute_between_speech=True, enhance_speech=True, only_while_typing=False)
+    )
+
+    before = slice(int(1.5 * sr), 4 * sr - sr // 20)
+    assert _untouched(gated[before], x[before]) == 1.0
+
+    first = slice(4 * sr - sr // 200, 4 * sr + sr // 20)  # the first keystroke
+    left = metrics.reduction_dba(kb[first], split_voice(gated[first], voice[first])[1], sr)
+    best = metrics.reduction_dba(kb[first], split_voice(always[first], voice[first])[1], sr)
+    assert left >= best - 1.0, (left, best)
+
+
+def test_gated_output_is_block_size_independent(tts_speech):
+    sr = 16000
+    voice = tts_speech(sr)[: 3 * sr]
+    typing, _ = synth.keyboard(sr, 2.0, seed=9)
+    x = np.concatenate([voice, typing, voice])
+    whole = Suppressor(sr, DEFAULT).process(x)
+    sup, rng, parts, i = Suppressor(sr, DEFAULT), np.random.default_rng(3), [], 0
+    while i < x.size:
+        n = int(rng.integers(1, 700))
+        parts.append(sup.process(x[i : i + n]))
+        i += n
+    assert np.allclose(np.concatenate(parts), whole, atol=1e-6)
 
 
 def test_default_keeps_a_clean_voice(tts_speech):

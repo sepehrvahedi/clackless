@@ -220,10 +220,13 @@ def run_benchmark(
         t0 = time.perf_counter()
         out = _run(Suppressor(sr, best), mix)
         rtf = (time.perf_counter() - t0) / duration
+        # Between bursts of typing the room tone (correctly) comes back: judge
+        # the keystrokes themselves.
+        keys = typing_mask(typing, sr)
         checks.append(
             Check(
                 "Typing removed, default (typist silent)",
-                metrics.reduction_dba(typing, out, sr),
+                metrics.reduction_dba(typing[keys], out[keys], sr),
                 "dB(A)",
                 40.0,
             )
@@ -236,6 +239,16 @@ def run_benchmark(
             checks.append(
                 Check(f"Speech preserved, default ({label})", metrics.si_sdr(out, lead), "dB SI-SDR", 15.0)
             )
+            if best.only_while_typing:
+                # Past the first second (cleaned in case a stream starts mid-typing),
+                # a voice nobody types over passes untouched.
+                late = np.concatenate([np.zeros(2 * sr), sig])
+                out = _run(Suppressor(sr, best), late)
+                checks.append(
+                    Check(
+                        f"Speech untouched, no typing ({label})", metrics.si_sdr(out, late), "dB SI-SDR", 40.0
+                    )
+                )
             say(f"scenario: typing while talking, default ({label})")
             mix, kb = synth.mix(sig, typing, 0.0)
             ref = sig[: mix.size]
@@ -262,6 +275,20 @@ def run_benchmark(
         checks.append(Check("Real-time factor, default", rtf, "x", 0.7, False))
         checks.append(Check("Added latency, default", Suppressor(sr, best).latency_ms, "ms", 120.0, False))
     return checks
+
+
+def typing_mask(typing: np.ndarray, sr: int, tail_s: float = 0.1) -> np.ndarray:
+    """Samples from each keystroke to `tail_s` after it: 5 ms frames > 15 dB above
+    the recording's quiet level (its 20th percentile), and the frames following."""
+    f = max(1, int(0.005 * sr))
+    m = typing.size // f
+    level = 10 * np.log10(np.mean(typing[: m * f].reshape(m, f) ** 2, axis=1) + 1e-12)
+    loud = level > np.percentile(level, 20) + 15.0
+    reach = int(round(tail_s * sr / f))
+    near = np.convolve(loud.astype(float), np.ones(reach + 1))[:m] > 0  # loud now or up to `reach` ago
+    mask = np.zeros(typing.size, dtype=bool)
+    mask[: m * f] = np.repeat(near, f)
+    return mask
 
 
 def split_voice(out: np.ndarray, voice: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:

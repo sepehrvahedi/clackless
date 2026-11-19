@@ -36,6 +36,7 @@ def _settings(args) -> Settings:
         mute_between_speech=mute,
         mute_depth_db=getattr(args, "mute_depth", 40.0),
         enhance_speech=enhance,
+        only_while_typing=getattr(args, "only_while_typing", True),
     ).validate()
 
 
@@ -99,15 +100,20 @@ def _render(st) -> None:
         state += "+AI "
     level = max(-90.0, st.input_dbfs)
     bar = "#" * int((level + 90) / 6)
-    work = (
-        f"silenced {st.muted_fraction * 100:3.0f}%" if st.muted else f"keystrokes removed {st.keystrokes:5d}"
-    )
+    if st.gated:
+        work = (
+            f"{'TYPING - cleaning' if st.typing else 'no typing - untouched'} | keystrokes {st.keystrokes:5d}"
+        )
+    elif st.muted:
+        work = f"silenced {st.muted_fraction * 100:3.0f}%"
+    else:
+        work = f"keystrokes removed {st.keystrokes:5d}"
     line = (
         f"\r{state} | in {level:5.1f} dBFS {bar:<15} | {work} "
         f"| strength {st.keystroke_strength:.1f} noise {st.noise_reduction:.1f} "
         f"| +{st.latency_ms:.0f} ms delay | dropouts {st.underruns + st.overruns}"
     )
-    sys.stdout.write(line.ljust(130)[:130])
+    sys.stdout.write(line.ljust(140)[:140])
     sys.stdout.flush()
 
 
@@ -313,6 +319,12 @@ def build_parser() -> argparse.ArgumentParser:
             action="store_false",
             help="turn off the neural voice cleanup (DeepFilterNet3) that removes typing and noise "
             "under speech (saves CPU, and 40 ms of delay with --no-mute)",
+        )
+        sp.add_argument(
+            "--always-on",
+            dest="only_while_typing",
+            action="store_false",
+            help="clean all the time; by default the audio passes untouched unless typing is heard",
         )
 
     def live(name, help_, noise_default):

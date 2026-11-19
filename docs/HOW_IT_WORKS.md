@@ -40,9 +40,41 @@ on the CPU with onnxruntime, so there is still no GPU, download or account.
 Speech is different: a vowel lasts 50–300 ms, a word ending fades over tens of
 milliseconds, and voiced speech is *periodic* (a glottal pulse every 2.5–14 ms).
 
-## Default: mute between speech
+## Default: clean only while typing (`src/clackless/keyboard.py`)
 
-The default for `listen` and `mic` is the simplest effective idea: **when the
+Every stage below changes a voice at least a little (the enhancer rebuilds it,
+the mute stage can shave a soft word ending). So by default none of them is
+heard unless someone is typing: the whole pipeline runs all the time, to stay
+warmed up, and its output is cross-faded with the untouched input.
+
+* **Detection**: the neural enhancer keeps voices and drops everything else,
+  so what it removes (input minus output, above 1.5 kHz, in 5 ms frames) is the
+  evidence. A keystroke there starts suddenly (≥ 7 dB above the removed signal
+  10–20 ms earlier), is most of what is there (within 3 dB of the input; a
+  clean voice loses 20 dB or more less), and has died away 15–30 ms later on
+  average, both in what is removed (≥ 6 dB) and in the input (≥ 5 dB).
+  Steady noise, fricatives ("s", "sh"), a meeting app's noise gate opening and
+  the first instant of a word (dropped by the enhancer before it locks on to
+  the voice) fail one of those tests.
+* **Timing**: the enhancer's output is 76 ms ahead of what is played (the
+  spectral stage's look-ahead and the mute stage's delay). The decay test
+  needs 30 ms of it, so the cleanup is fully on 10 ms before the first
+  click is heard. It stays on for 1 s after the last keystroke, then fades out
+  over 150 ms. A stream starts with it on for a second, in case it begins in
+  the middle of typing.
+* **Measured** on 45 voice clips without typing (natural and robotic TTS
+  voices; clean, in a room, with fan noise or hiss): on 0.6 % of the time.
+  On three real keyboards (alone, under a voice, quiet, under a fan): 96 % of
+  the typing energy is covered. A voice nobody types over comes out bit for
+  bit as it went in.
+* **16 kHz** audio has no band above 8 kHz where keystrokes stand out from a
+  voice: there the cleanup is also on for ~5 % of plain speech, and a
+  keystroke right under a loud word can be missed. Meeting audio devices run
+  at 48 kHz.
+
+## While typing: mute between speech
+
+The first thing the cleanup does is the simplest effective idea: **when the
 other person isn't speaking, there's nothing to protect, so silence the line**
 (typing, room tone, everything). When they speak, their voice passes through
 untouched.
@@ -189,8 +221,10 @@ click or echo to "protect".
 
 ## Known limitations
 
+* While someone types, their room tone disappears between sentences; it
+  comes back about a second after the typing stops.
 * On real keyboards, clicks end up about half as loud (8–11 dB(A)), not
-  silent. Use `clackless record` + `clackless selftest --typing` to measure
+  silent, in `--no-mute --no-enhance` mode. Use `clackless record` + `clackless selftest --typing` to measure
   yours, and please share results in an issue.
 * Typing *while the typist talks* is reduced, not removed: ~7.5 dB(A) on real
   keyboards with the neural cleanup (default), 2–5 dB(A) without it.

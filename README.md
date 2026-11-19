@@ -3,10 +3,11 @@
 **Silence the other person's keyboard on your calls — and your own on theirs.**
 
 Clackless sits between your meeting app (Teams, Zoom, Google Meet, Slack, Discord, …) and your
-speakers or microphone. While the other person is quiet, a neural voice detector keeps the line
-silent, so their typing simply isn't heard. When they speak, a neural speech enhancer
-(DeepFilterNet3) strips the typing from under their voice. It runs locally on Windows, macOS and
-Linux, needs no GPU, account or internet connection, and adds about 0.1 s of delay.
+speakers or microphone. It only steps in while someone is typing: as long as nobody types, the
+audio passes through untouched, so not a sound of anyone's voice is lost. As soon as a keystroke
+is heard, a neural voice detector silences the line between their words and a neural speech
+enhancer (DeepFilterNet3) strips the typing from under their voice. It runs locally on Windows,
+macOS and Linux, needs no GPU, account or internet connection, and adds about 0.1 s of delay.
 
 ![Spectrograms before and after Clackless](docs/spectrogram.png)
 
@@ -81,23 +82,30 @@ voice damage are measured separately on the same processing ("shadow filtering")
 enhancer is measured directly (the voice part of the output is its projection onto the clean voice,
 everything else counts as left-over typing, so the numbers are conservative).
 
-### Default: mute between speech (`clackless listen`, `clackless mic`)
+### Default: clean only while typing (`clackless listen`, `clackless mic`)
 
 | Scenario | Result |
 |---|---|
 | They type while you talk (they're silent) | **50+ dB(A) quieter: silent** |
 | They type *while* talking (typing as loud as their voice) | **~7.5 dB(A) quieter**, and their voice much clearer: 8 → 17 dB SI-SDR |
 | They type more quietly while talking (half as loud) | ~4.6 dB(A) quieter; voice 14 → 20.5 dB SI-SDR |
-| Their voice with no typing | kept: 24–35 dB SI-SDR on natural voices, the same as without the cleanup |
-| The start of their words | kept (≤ 1.5 dB lost in the first 200 ms) |
-| Right after they stop talking | 40–52 dB(A) quieter (before: 3–26, while the line was still open) |
-| Their room tone and background noise | removed |
+| Their voice with no typing | **untouched**: passed through bit for bit |
+| Typing that starts in the middle of their sentence | cleaned from the first keystroke; the words before it untouched |
+| The start of their words, while they type | kept (≤ 1.5 dB lost in the first 200 ms) |
+| Right after they stop talking, while they type | 40–52 dB(A) quieter |
+| Their room tone and background noise | removed while they type, untouched otherwise |
 | Your own mic (`mic`): your typing + a fan, while you talk | your voice 2 → 13 dB SI-SDR |
 | Added delay | ~116 ms |
 | CPU | about a quarter of one core on a MacBook Air |
 
-How it works, in two stages:
+How it works:
 
+0. **Only while typing.** The enhancer below runs all the time, but its output is used only around
+   keystrokes. What it removes is the evidence: a keystroke is a sudden burst, most of it removed,
+   that dies away within 30 ms (a voice, a fan or an "s" is not). Each one switches the cleanup on
+   from 10 ms before it (the delay below leaves time) until 1 s after it, with short cross-fades.
+   On 45 voice clips without typing it is on 0.6 % of the time; it covers 96 % of real typing.
+   `--always-on` cleans all the time instead.
 1. **Between speech, silence.** A small neural voice-activity detector
    ([Silero VAD](https://github.com/snakers4/silero-vad), bundled, MIT) decides whether someone is
    speaking. On real typing it fires < 0.5 % of the time; on voices, even under loud typing,
@@ -147,11 +155,13 @@ if you are happy to share it). That is the fastest way to make Clackless better.
 | `clackless devices` | list audio devices (virtual cables are marked) |
 | `clackless setup [--apply\|--remove]` | per-OS setup guide; on Linux creates/removes virtual devices |
 
-Common options: `--no-mute` (keep the line open between speech; 76 ms delay instead of ~116 ms),
-`--no-enhance` (turn off the neural voice cleanup: less CPU, and 36 ms with `--no-mute`),
+Common options: `--always-on` (clean all the time, not only while typing is heard),
+`--no-mute` (keep the line open between speech; 76 ms delay instead of ~116 ms),
+`--no-enhance` (turn off the neural voice cleanup and the typing detector, which relies on it:
+less CPU, and 36 ms with `--no-mute`),
 `--mute-depth DB` (how far to turn it down, default 40), `--strength 0..1` (keystroke suppression),
 `--noise 0..1` (extra background-noise reduction; default 0, or 0.5 for `mic --no-enhance`),
-`--samplerate`, `--buffer-ms`. `clackless file` takes `--mute` and `--no-enhance` too. Devices can be given by index or by
+`--samplerate`, `--buffer-ms`. `clackless file` takes `--mute`, `--always-on` and `--no-enhance` too. Devices can be given by index or by
 part of their name.
 
 ## Privacy
@@ -168,8 +178,11 @@ modes writes nothing to disk.
   typing only partly removed).
 * **CPU**: the neural cleanup needs about an eighth of one core (MacBook Air); on old machines use
   `--no-enhance` if you hear dropouts.
-* **Silence between sentences**: with the default mode their room tone disappears between
-  sentences, like many meeting apps' own noise suppression does.
+* **Silence between sentences while they type**: their room tone disappears between sentences
+  and comes back about a second after the typing stops.
+* **The typing detector is tuned for 48 kHz**, the rate meeting audio devices use. At 16 kHz
+  there is less of a keystroke's sound to tell it from a voice: the cleanup then also switches on
+  for about 5 % of plain speech, and a keystroke right under a loud word can slip through.
 * **You need a virtual audio cable** on macOS and Windows (free, one-time install). Use
   separate cables for `listen` and `mic` if you run both.
 * **Linux live routing** relies on PortAudio's ALSA `pulse` device (pipewire-alsa or the

@@ -13,7 +13,7 @@ stateful polyphase filter, so any block size gives identical output.
 from __future__ import annotations
 
 from math import gcd
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 from scipy import signal
@@ -129,6 +129,11 @@ class SpeechEnhancer:
 
     def process(self, x: np.ndarray, bypass: bool = False) -> np.ndarray:
         """Enhance a block; with ``bypass`` return the input delayed by the same amount."""
+        enhanced, delayed = self.process_pair(x)
+        return delayed if bypass else enhanced
+
+    def process_pair(self, x: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """(enhanced block, input block delayed by the same amount)."""
         x = np.asarray(x, dtype=np.float64).reshape(-1)
         n = x.size
         y = self._in_rs.push(x) if self._resample else x
@@ -149,7 +154,7 @@ class SpeechEnhancer:
             out = np.concatenate([out, np.zeros(n - out.size)])
         raw = np.concatenate([self._raw_delay, x])
         delayed, self._raw_delay = raw[:n], raw[n:]
-        return delayed if bypass else out
+        return out, delayed
 
 
 def make_enhancer(sample_rate: int) -> Optional[SpeechEnhancer]:

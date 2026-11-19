@@ -108,6 +108,10 @@ class LiveStatus:
     """The voice detector hears speech (with muting on, everything else is silenced)."""
     enhancing: bool = False
     """The neural voice cleanup is running."""
+    gated: bool = False
+    """The cleanup only runs while typing is heard."""
+    typing: bool = True
+    """The cleanup is on right now (always, unless gated)."""
 
 
 class Pipeline:
@@ -208,7 +212,7 @@ class Pipeline:
             running=self.running,
             bypass=self.settings.bypass,
             input_dbfs=10 * np.log10(self._level),
-            keystrokes=self.suppressor.stats.keystrokes,
+            keystrokes=self.suppressor.keystrokes,
             underruns=self.ring.underruns,
             overruns=self.ring.overruns,
             latency_ms=added_ms,
@@ -218,6 +222,8 @@ class Pipeline:
             muted=self.settings.mute_between_speech,
             muted_fraction=self.suppressor.stats.muted_fraction,
             enhancing=self.suppressor.enhancing,
+            gated=self.suppressor.gated,
+            typing=self.suppressor.typing,
         )
 
     def __enter__(self):
